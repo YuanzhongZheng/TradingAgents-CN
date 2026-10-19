@@ -158,7 +158,7 @@ class MongoDBCacheAdapter:
         return ['tushare', 'akshare', 'baostock']
 
     def get_historical_data(self, symbol: str, start_date: str = None, end_date: str = None,
-                          period: str = "daily") -> Optional[pd.DataFrame]:
+                          period: str = "daily", adjust: str = None) -> Optional[pd.DataFrame]:
         """
         获取历史数据，支持多周期，按数据新鲜度优先查询。
 
@@ -184,6 +184,7 @@ class MongoDBCacheAdapter:
 
         try:
             from tradingagents.utils.stock_utils import StockUtils
+            from app.services.historical_data_service import historical_adjust_query
 
             code6 = str(symbol).zfill(6)
             is_fund = StockUtils.is_fund(code6)
@@ -203,6 +204,7 @@ class MongoDBCacheAdapter:
                         symbol_field: code6,
                         **({"period": period} if not is_fund else {}),
                         "data_source": data_source,
+                        **historical_adjust_query(adjust),
                     },
                     {"trade_date": 1, "_id": 0},
                     sort=[("trade_date", -1)]
@@ -237,6 +239,7 @@ class MongoDBCacheAdapter:
             }
             if not is_fund:
                 query["period"] = period
+            query.update(historical_adjust_query(adjust))
             if start_date:
                 query["trade_date"] = {"$gte": start_date}
             if end_date:

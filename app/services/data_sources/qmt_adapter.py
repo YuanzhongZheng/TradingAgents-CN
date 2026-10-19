@@ -1003,7 +1003,15 @@ class QMTAdapter(DataSourceAdapter):
             logger.error(f"QMT: 获取实时行情失败: {e}")
             return None
 
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None) -> Optional[List[Dict[str, Any]]]:
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
         """获取 K 线数据
 
         根据迅投官方文档：
@@ -1037,12 +1045,24 @@ class QMTAdapter(DataSourceAdapter):
 
             # 根据官方文档，使用 get_market_data_ex 接口
             # 传入空的 field_list 表示获取所有字段
-            data = xt.get_market_data_ex(
-                field_list=[],  # 空列表表示获取所有字段
-                stock_list=[xt_code],
-                period=xt_period,
-                count=limit  # 获取最近 N 条数据
-            )
+            market_kwargs = {
+                "field_list": [],
+                "stock_list": [xt_code],
+                "period": xt_period,
+                "count": limit,
+            }
+            if start_date or end_date or adj:
+                from .base import compact_date
+                start_compact = compact_date(start_date)
+                end_compact = compact_date(end_date)
+                if start_compact:
+                    market_kwargs["start_time"] = start_compact
+                if end_compact:
+                    market_kwargs["end_time"] = end_compact
+                market_kwargs["dividend_type"] = {"qfq": "front", "hfq": "back"}.get(adj, "none")
+                if start_compact or end_compact:
+                    market_kwargs["count"] = -1
+            data = xt.get_market_data_ex(**market_kwargs)
             if not data or xt_code not in data:
                 return None
             df = data[xt_code]
@@ -1050,7 +1070,8 @@ class QMTAdapter(DataSourceAdapter):
                 return None
             # xtdata 返回 {stock_code: pd.DataFrame}
             if isinstance(df, pd.DataFrame):
-                df = df.tail(limit)
+                if not (start_date or end_date):
+                    df = df.tail(limit)
                 items = []
                 for idx, row in df.iterrows():
                     # get_market_data_ex 使用 DataFrame 的索引作为时间

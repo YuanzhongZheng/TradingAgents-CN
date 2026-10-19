@@ -440,6 +440,7 @@ def get_stock_daily_quotes(
     query = {
         "symbol": symbol,
         "period": period,
+        "adjust": None,
         **date_filter,
     }
     if source:

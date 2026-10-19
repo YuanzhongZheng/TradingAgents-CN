@@ -5,7 +5,7 @@ from typing import Optional, Dict
 import logging
 import pandas as pd
 
-from .base import DataSourceAdapter
+from .base import DataSourceAdapter, iso_date
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +131,19 @@ class LocalAdapter(DataSourceAdapter):
             logger.error(f"Local: Failed to fetch realtime quotes: {e}")
             return None
 
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None):
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
         """获取K线数据（从本地数据库读取）"""
         try:
             from app.core.database import get_mongo_db_sync
+            from app.services.historical_data_service import historical_adjust_query
             db = get_mongo_db_sync()
             collection = db.stock_daily_quotes
 
@@ -148,12 +157,25 @@ class LocalAdapter(DataSourceAdapter):
                 "60m": "60min",
             }
             normalized_period = period_map.get(period, period)
-            
-            # 查询K线数据
-            cursor = collection.find(
-                {"symbol": code, "data_source": "local", "period": normalized_period}
-            ).sort("trade_date", 1).limit(limit)
-            
+            query = {
+                "symbol": code,
+                "data_source": "local",
+                "period": normalized_period,
+                **historical_adjust_query(adj),
+            }
+            start_iso = iso_date(start_date)
+            end_iso = iso_date(end_date)
+            if start_iso or end_iso:
+                date_filter = {}
+                if start_iso:
+                    date_filter["$gte"] = start_iso
+                if end_iso:
+                    date_filter["$lte"] = end_iso
+                query["trade_date"] = date_filter
+
+            cursor = collection.find(query).sort("trade_date", 1)
+            if not (start_iso or end_iso):
+                cursor = cursor.limit(limit)
             klines = list(cursor)
             
             if not klines:

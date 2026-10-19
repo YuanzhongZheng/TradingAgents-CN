@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 
-from .base import DataSourceAdapter
+from .base import DataSourceAdapter, compact_date
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +412,15 @@ class AKShareAdapter(DataSourceAdapter):
             logger.error(f"获取AKShare {source} 实时快照失败: {e}")
             return None
 
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None):
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
         """AKShare K-line as fallback. Daily/weekly/monthly retry Tencent and Sina when Eastmoney fails."""
         if not self.is_available():
             return None
@@ -423,8 +431,16 @@ class AKShareAdapter(DataSourceAdapter):
                 period_map = {"day": "daily", "week": "weekly", "month": "monthly"}
                 adjust_map = {None: "", "qfq": "qfq", "hfq": "hfq"}
                 symbol = self._get_akshare_cn_symbol(code6)
-                end_date = datetime.now().strftime("%Y%m%d")
-                start_date = (datetime.now() - timedelta(days=self._get_kline_fallback_window(period, limit))).strftime("%Y%m%d")
+                requested_start = compact_date(start_date)
+                requested_end = compact_date(end_date)
+                if requested_start or requested_end:
+                    start_compact = requested_start or "19900101"
+                    end_compact = requested_end or datetime.now().strftime("%Y%m%d")
+                    row_limit = max(limit, 100000)
+                else:
+                    end_compact = datetime.now().strftime("%Y%m%d")
+                    start_compact = (datetime.now() - timedelta(days=self._get_kline_fallback_window(period, limit))).strftime("%Y%m%d")
+                    row_limit = limit
 
                 fetchers = [
                     (
@@ -432,6 +448,8 @@ class AKShareAdapter(DataSourceAdapter):
                         lambda: ak.stock_zh_a_hist(
                             symbol=code6,
                             period=period_map[period],
+                            start_date=start_compact,
+                            end_date=end_compact,
                             adjust=adjust_map.get(adj, "")
                         ),
                         False,
@@ -440,8 +458,8 @@ class AKShareAdapter(DataSourceAdapter):
                         "sina",
                         lambda: ak.stock_zh_a_daily(
                             symbol=symbol,
-                            start_date=start_date,
-                            end_date=end_date,
+                            start_date=start_compact,
+                            end_date=end_compact,
                             adjust=adjust_map.get(adj, "")
                         ),
                         period != "day",
@@ -450,8 +468,8 @@ class AKShareAdapter(DataSourceAdapter):
                         "tencent",
                         lambda: ak.stock_zh_a_hist_tx(
                             symbol=symbol,
-                            start_date=start_date,
-                            end_date=end_date,
+                            start_date=start_compact,
+                            end_date=end_compact,
                             adjust=adjust_map.get(adj, "")
                         ),
                         period != "day",
@@ -469,7 +487,7 @@ class AKShareAdapter(DataSourceAdapter):
                             if df is None or getattr(df, 'empty', True):
                                 logger.warning(f"AKShare {source_name} get_kline resample returned empty for {code6}")
                                 continue
-                        return self._build_kline_items(df, period, limit)
+                        return self._build_kline_items(df, period, row_limit)
                     except Exception as source_error:
                         logger.warning(f"AKShare {source_name} get_kline failed for {code6}: {source_error}")
                 return None

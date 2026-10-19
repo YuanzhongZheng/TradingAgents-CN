@@ -6,6 +6,24 @@ from typing import Optional, Dict
 import pandas as pd
 
 
+def compact_date(value: Optional[str]) -> Optional[str]:
+    """把日期收敛成 YYYYMMDD。无法识别时返回 None。"""
+    if value is None or value == "":
+        return None
+    digits = "".join(ch for ch in str(value) if ch.isdigit())
+    if len(digits) < 8:
+        return None
+    return digits[:8]
+
+
+def iso_date(value: Optional[str]) -> Optional[str]:
+    """把日期收敛成 YYYY-MM-DD。无法识别时返回 None。"""
+    compact = compact_date(value)
+    if not compact:
+        return None
+    return f"{compact[:4]}-{compact[4:6]}-{compact[6:8]}"
+
+
 class DataSourceAdapter(ABC):
     """数据源适配器基类"""
 
@@ -59,8 +77,19 @@ class DataSourceAdapter(ABC):
 
     # 新增：K线与新闻抽象接口
     @abstractmethod
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None):
-        """获取K线，返回按时间正序的列表: [{time, open, high, low, close, volume, amount}]"""
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
+        """获取K线，返回按时间正序的列表: [{time, open, high, low, close, volume, amount}]
+
+        start_date/end_date 给出时必须返回该区间，不能用最近 N 条代替。
+        """
         raise NotImplementedError
 
     @abstractmethod

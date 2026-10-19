@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 
-from .base import DataSourceAdapter
+from .base import DataSourceAdapter, iso_date
 
 logger = logging.getLogger(__name__)
 
@@ -236,11 +236,66 @@ class BaoStockAdapter(DataSourceAdapter):
             return None
         return None
 
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None):
-        """BaoStock not used for K-line here; return None to allow fallback"""
-        if not self.is_available():
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
+        """按日期区间读取 BaoStock K 线。未给区间时保持原行为，交给其他数据源。"""
+        if not self.is_available() or not start_date or not end_date:
             return None
-        return None
+        start_iso = iso_date(start_date)
+        end_iso = iso_date(end_date)
+        if not start_iso or not end_iso:
+            return None
+        try:
+            import baostock as bs
+            digits = "".join(ch for ch in str(code) if ch.isdigit())
+            code6 = (digits[-6:] if len(digits) >= 6 else digits.zfill(6))
+            bs_code = f"sh.{code6}" if code6.startswith(("5", "6", "9")) else f"sz.{code6}"
+            frequency = {"day": "d", "week": "w", "month": "m"}.get(period, "d")
+            adjustflag = {"qfq": "2", "hfq": "1"}.get(adj, "3")
+            fields = "date,code,open,high,low,close,volume,amount"
+            login = bs.login()
+            if login.error_code != "0":
+                logger.error(f"BaoStock: Login failed: {login.error_msg}")
+                return None
+            try:
+                rs = bs.query_history_k_data_plus(
+                    code=bs_code,
+                    fields=fields,
+                    start_date=start_iso,
+                    end_date=end_iso,
+                    frequency=frequency,
+                    adjustflag=adjustflag,
+                )
+                if rs.error_code != "0":
+                    logger.error(f"BaoStock: K-line query failed: {rs.error_msg}")
+                    return None
+                items = []
+                while (rs.error_code == "0") & rs.next():
+                    row = rs.get_row_data()
+                    if not row or len(row) < 7:
+                        continue
+                    items.append({
+                        "time": row[0],
+                        "open": self._safe_float(row[2]),
+                        "high": self._safe_float(row[3]),
+                        "low": self._safe_float(row[4]),
+                        "close": self._safe_float(row[5]),
+                        "volume": self._safe_float(row[6]),
+                        "amount": self._safe_float(row[7]) if len(row) > 7 else None,
+                    })
+                return items or None
+            finally:
+                bs.logout()
+        except Exception as e:
+            logger.error(f"BaoStock: get_kline failed: {e}")
+            return None
 
     def get_news(self, code: str, days: int = 2, limit: int = 50, include_announcements: bool = True):
         """BaoStock does not provide news in this adapter; return None"""

@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta
 import pandas as pd
 
-from .base import DataSourceAdapter
+from .base import DataSourceAdapter, compact_date
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,15 @@ class TushareAdapter(DataSourceAdapter):
         logger.info("⏸️ Tushare 实时行情接口已禁用，跳过调用（由定时任务统一管理）")
         return None
 
-    def get_kline(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None):
+    def get_kline(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ):
         """Get K-line bars using tushare pro_bar
         period: day/week/month/5m/15m/30m/60m
         adj: None/qfq/hfq
@@ -147,7 +155,23 @@ class TushareAdapter(DataSourceAdapter):
             else:
                 fields = "open,high,low,close,vol,amount,trade_date"
 
-            df = pro_bar(ts_code=ts_code, api=prov.api, freq=freq, adj=adj_arg, limit=limit, fields=fields)
+            bar_kwargs = {
+                "ts_code": ts_code,
+                "api": prov.api,
+                "freq": freq,
+                "adj": adj_arg,
+                "fields": fields,
+            }
+            start_compact = compact_date(start_date)
+            end_compact = compact_date(end_date)
+            if start_compact or end_compact:
+                if start_compact:
+                    bar_kwargs["start_date"] = start_compact
+                if end_compact:
+                    bar_kwargs["end_date"] = end_compact
+            else:
+                bar_kwargs["limit"] = limit
+            df = pro_bar(**bar_kwargs)
             if df is None or getattr(df, 'empty', True):
                 return None
             # standardize columns

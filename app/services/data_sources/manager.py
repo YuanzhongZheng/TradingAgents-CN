@@ -16,6 +16,9 @@ from .qmt_adapter import QMTAdapter
 
 logger = logging.getLogger(__name__)
 
+# 分析读取使用前复权，和原 Tushare/AKShare/BaoStock 历史接口一致。
+ANALYSIS_BAR_ADJUST = "qfq"
+
 
 class DataSourceManager:
     """
@@ -344,15 +347,37 @@ class DataSourceManager:
 
 
 
-    def get_kline_with_fallback(self, code: str, period: str = "day", limit: int = 120, adj: Optional[str] = None) -> Tuple[Optional[List[Dict]], Optional[str]]:
-        """按优先级尝试获取K线，返回(items, source)"""
+    def get_kline_with_fallback(
+        self,
+        code: str,
+        period: str = "day",
+        limit: int = 120,
+        adj: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Tuple[Optional[List[Dict]], Optional[str]]:
+        """按优先级尝试获取K线，返回(items, source)。
+
+        给出日期区间时，只接受区间内的 K 线；区间外的数据会换下一个数据源。
+        """
         available_adapters = self.get_available_adapters()
         for adapter in available_adapters:
             try:
                 logger.info(f"Trying to fetch kline from {adapter.name}")
-                items = adapter.get_kline(code=code, period=period, limit=limit, adj=adj)
+                items = adapter.get_kline(
+                    code=code,
+                    period=period,
+                    limit=limit,
+                    adj=adj,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if start_date or end_date:
+                    items = _items_within_dates(items, start_date, end_date)
                 if items:
                     return items, adapter.name
+                if start_date or end_date:
+                    logger.info(f"{adapter.name} 在 {start_date}..{end_date} 没有K线，尝试下一个数据源")
             except Exception as e:
                 logger.error(f"Failed to fetch kline from {adapter.name}: {e}")
                 continue
@@ -407,7 +432,8 @@ class DataSourceManager:
     ) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
         """分析与同步共用的行情读路径。
 
-        先读同步写入的 Mongo 缓存；没有覆盖请求区间时，按适配器优先级拉取并写回。
+        先读前复权缓存；没有覆盖请求区间时，按适配器优先级拉取同一复权口径并写回。
+        日期会传给数据源，区间外的 K 线不会返回。
         """
         reader = cache_reader or _read_mongo_history
         try:
@@ -422,6 +448,9 @@ class DataSourceManager:
             code=_normalize_symbol(symbol),
             period=_kline_period(period),
             limit=_history_bar_limit(start_date, end_date, period),
+            adj=ANALYSIS_BAR_ADJUST,
+            start_date=start_date,
+            end_date=end_date,
         )
         if not items or not source:
             return None, None
@@ -442,7 +471,10 @@ class DataSourceManager:
         try:
             from pymongo import UpdateOne
             from app.core.database import get_mongo_db_sync
-            from app.services.historical_data_service import HistoricalDataService
+            from app.services.historical_data_service import (
+                HistoricalDataService,
+                ensure_stock_quote_identity_index,
+            )
 
             code = _normalize_symbol(symbol)
             prepared = frame.copy()
@@ -453,18 +485,22 @@ class DataSourceManager:
             operations = []
             for index, row in prepared.iterrows():
                 document = service._standardize_record(code, row, source, "CN", period, index)
+                document["adjust"] = ANALYSIS_BAR_ADJUST
                 operations.append(UpdateOne(
                     {
                         "symbol": document["symbol"],
                         "trade_date": document["trade_date"],
                         "data_source": document["data_source"],
                         "period": document["period"],
+                        "adjust": ANALYSIS_BAR_ADJUST,
                     },
                     {"$setOnInsert": document},
                     upsert=True,
                 ))
             if operations:
-                get_mongo_db_sync().stock_daily_quotes.bulk_write(operations, ordered=False)
+                collection = get_mongo_db_sync().stock_daily_quotes
+                ensure_stock_quote_identity_index(collection)
+                collection.bulk_write(operations, ordered=False)
                 logger.info("行情已写回缓存: %s source=%s rows=%s", code, source, len(operations))
         except Exception as exc:
             logger.warning("行情写回缓存失败，本次读取结果仍然返回: %s", exc)
@@ -529,21 +565,35 @@ def _filter_frame_by_dates(frame: pd.DataFrame, start_date: Optional[str], end_d
         return frame
     date_column = next((name for name in ("date", "trade_date", "time") if name in frame.columns), None)
     if date_column is None:
-        return frame
-    dates = pd.to_datetime(frame[date_column], errors="coerce")
+        return frame.iloc[0:0]
+    dates = pd.to_datetime(frame[date_column], errors="coerce").dt.normalize()
     mask = dates.notna()
     if start_date:
-        mask &= dates >= pd.to_datetime(start_date)
+        mask &= dates >= pd.to_datetime(start_date).normalize()
     if end_date:
-        mask &= dates <= pd.to_datetime(end_date)
-    filtered = frame.loc[mask]
-    return filtered if not filtered.empty else frame
+        mask &= dates <= pd.to_datetime(end_date).normalize()
+    return frame.loc[mask]
+
+
+def _items_within_dates(items: Optional[List[Dict]], start_date: Optional[str], end_date: Optional[str]) -> List[Dict]:
+    if not items:
+        return []
+    if not start_date and not end_date:
+        return list(items)
+    frame = _filter_frame_by_dates(pd.DataFrame(items), start_date, end_date)
+    if frame is None or frame.empty:
+        return []
+    return frame.to_dict("records")
 
 
 def _read_mongo_history(symbol: str, start_date: Optional[str], end_date: Optional[str], period: str):
     from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
     return get_mongodb_cache_adapter().get_historical_data(
-        _normalize_symbol(symbol), start_date, end_date, period=period
+        _normalize_symbol(symbol),
+        start_date,
+        end_date,
+        period=period,
+        adjust=ANALYSIS_BAR_ADJUST,
     )
 
 

@@ -14,6 +14,37 @@ from app.core.database import get_database
 
 logger = logging.getLogger(__name__)
 
+LEGACY_QUOTE_INDEX_NAME = "symbol_date_source_period_unique"
+QUOTE_IDENTITY_INDEX_NAME = "symbol_date_source_period_adjust_unique"
+QUOTE_IDENTITY_INDEX_KEYS = [
+    ("symbol", 1),
+    ("trade_date", 1),
+    ("data_source", 1),
+    ("period", 1),
+    ("adjust", 1),
+]
+
+
+def historical_adjust_query(adjust: Optional[str] = None) -> Dict[str, Any]:
+    """未标复权的旧记录视为不复权，避免和前复权分析缓存混在同一条行情里。"""
+    return {"adjust": adjust} if adjust else {"adjust": None}
+
+
+def ensure_stock_quote_identity_index(collection) -> None:
+    """唯一键包含复权口径，使不复权同步记录和前复权分析记录可以并存。"""
+    info = collection.index_information()
+    legacy = info.get(LEGACY_QUOTE_INDEX_NAME)
+    if legacy and "adjust" not in [name for name, _direction in legacy.get("key", [])]:
+        collection.drop_index(LEGACY_QUOTE_INDEX_NAME)
+        info = collection.index_information()
+    if QUOTE_IDENTITY_INDEX_NAME not in info:
+        collection.create_index(
+            QUOTE_IDENTITY_INDEX_KEYS,
+            unique=True,
+            name=QUOTE_IDENTITY_INDEX_NAME,
+            background=False,
+        )
+
 
 class HistoricalDataService:
     """统一历史数据管理服务"""
@@ -53,13 +84,17 @@ class HistoricalDataService:
             
             logger.info("📊 检查并创建历史数据索引...")
 
-            # 1. 复合唯一索引：股票代码+交易日期+数据源+周期（用于 upsert）
-            await collection.create_index([
-                ("symbol", 1),
-                ("trade_date", 1),
-                ("data_source", 1),
-                ("period", 1)
-            ], unique=True, name="symbol_date_source_period_unique", background=True)
+            # 1. 复合唯一索引：股票代码+交易日期+数据源+周期+复权口径
+            await collection.create_index(
+                QUOTE_IDENTITY_INDEX_KEYS,
+                unique=True,
+                name=QUOTE_IDENTITY_INDEX_NAME,
+                background=False,
+            )
+            index_info = await collection.index_information()
+            legacy = index_info.get(LEGACY_QUOTE_INDEX_NAME)
+            if legacy and "adjust" not in [name for name, _direction in legacy.get("key", [])]:
+                await collection.drop_index(LEGACY_QUOTE_INDEX_NAME)
 
             # 2. 股票代码索引（查询单只股票的历史数据）
             await collection.create_index([("symbol", 1)], name="symbol_index", background=True)
@@ -165,7 +200,8 @@ class HistoricalDataService:
                         "symbol": doc["symbol"],
                         "trade_date": doc["trade_date"],
                         "data_source": doc["data_source"],
-                        "period": doc["period"]
+                        "period": doc["period"],
+                        **historical_adjust_query(doc.get("adjust")),
                     }
 
                     from pymongo import ReplaceOne, UpdateOne
@@ -477,6 +513,8 @@ class HistoricalDataService:
 
             if period:
                 query["period"] = period
+
+            query.update(historical_adjust_query())
             
             # 执行查询
             cursor = collection.find(query).sort("trade_date", -1)
@@ -504,7 +542,7 @@ class HistoricalDataService:
         
         try:
             result = await collection.find_one(
-                {"symbol": symbol, "data_source": data_source},
+                {"symbol": symbol, "data_source": data_source, **historical_adjust_query()},
                 sort=[("trade_date", -1)]
             )
             
