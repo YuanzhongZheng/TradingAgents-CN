@@ -206,7 +206,7 @@ class LLMConfig(BaseModel):
     retry_times: int = Field(default=3, description="重试次数")
     reasoning_effort: Optional[str] = Field(
         default=None,
-        description="推理模型思考深度 (none/minimal/low/medium/high/xhigh/max)，仅火山方舟推理模型支持"
+        description="推理模型思考深度；本机 Codex Astra 支持 low/medium/high/xhigh/max"
     )
     enabled: bool = Field(default=True, description="是否启用")
     description: Optional[str] = Field(None, description="配置描述")

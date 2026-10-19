@@ -23,7 +23,7 @@ NProgress.configure({
 const routes: RouteRecordRaw[] = [
   {
     path: '/',
-    redirect: '/dashboard'
+    redirect: isJdyunMode() ? '/dashboard' : '/analysis/single'
   },
   // 兼容文档链接：将 /paper/<name>.md 重定向到学习中心文章路由
   {
@@ -102,6 +102,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/analysis',
     name: 'Analysis',
+    meta: { title: '研究', requiresAuth: true },
     component: () => import('@/layouts/BasicLayout.vue'),
     redirect: '/analysis/single',
     children: [
@@ -749,7 +750,7 @@ router.beforeEach(async (to, _from, next) => {
 
   // 如果已登录且访问登录页，重定向到仪表板
   if (authStore.isAuthenticated && to.name === 'Login') {
-    next('/dashboard')
+    next(isJdyunMode() ? '/dashboard' : '/analysis/single')
     return
   }
 

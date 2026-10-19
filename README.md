@@ -116,6 +116,33 @@ npm run dev                     # 默认 http://localhost:3000
 
 登录后请先在系统设置中配置大模型 API Key（OpenAI / DeepSeek / 通义千问等），并按需配置行情数据 Token。
 
+### 简洁研究界面
+
+本机版登录后默认进入研究页。输入股票名称后选择搜索结果，或直接输入六位代码，即可使用默认配置开始分析；ETF 代码会自动识别。
+分析日期、深度、分析师、模型与流程仍可通过“高级选项”调整。主导航保留研究、自选、报告、设置，其余功能位于“更多功能”。
+
+在“设置 → 研究模型”点击“设为研究默认模型”，可将已启用的本机 Astra 同时设为快速分析、深度分析和研究助手的默认模型。
+“测试连接”会真实调用模型；默认设置只在点击保存后改变。数据库或模型配置不可用时，页面提示错误，不会默默替换研究模型。
+
+### 本机 Codex / Astra 分析
+
+安装官方 Codex CLI（`npm install -g @openai/codex@latest`），在运行后端的同一系统账号下执行
+`codex login`，使用具有 Astra 权限的 ChatGPT 账号登录。后端启动时检测到 CLI 后，会自动添加
+“本机 Codex（ChatGPT 登录）”厂家和“Astra（本机 Codex）”模型，无需配置 API Key。
+
+在分析页面把快速模型、深度模型都选为 **Astra（本机 Codex）**，即可让 Astra 直接完成各分析师的
+分析与综合报告；也可只替换其中一档。原有默认选择不会自动改变。系统设置中的“测试模型”会实际
+调用 Astra 并消耗套餐额度。额度不足、登录失效或模型不可用时会报错，不会自动改用付费 API。
+
+接入通过 `codex exec` 的结构化输出传递应用工具请求，行情、财务、新闻等工具仍由项目执行，
+结果随后交给 Astra 继续分析。每轮传递完整对话，不继承桌面聊天历史。当前为文本分析，模型正文在
+每轮完成后返回；最大 Token 数为正文长度软目标。默认每轮超时 600 秒，同一后端进程最多并发两次。
+
+CLI 不在后端 PATH 时，在 `.env` 设置 `CODEX_CLI_PATH=/绝对路径/codex`。
+设置 `CODEX_LOCAL_ENABLED=false` 可禁用此接入。它使用后端所在机器的登录，仅用于本人本机部署。
+
+官方接口说明：[Codex 非交互模式](https://learn.chatgpt.com/docs/non-interactive-mode)。
+
 ## 文档
 
 - 用户手册：[docs/02-user-guide/user-manual-v3.0.md](docs/02-user-guide/user-manual-v3.0.md)

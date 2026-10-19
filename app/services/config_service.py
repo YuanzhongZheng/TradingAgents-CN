@@ -1233,6 +1233,17 @@ class ConfigService:
             provider_str = llm_config.provider.value if hasattr(llm_config.provider, 'value') else str(llm_config.provider)
 
             logger.info(f"🧪 测试大模型配置: {provider_str} - {llm_config.model_name}")
+            if provider_str == "codex":
+                from core.llm.codex_runtime import acomplete
+                result = await acomplete(
+                    [{"role": "user", "content": "请只回复 ASTRA_OK。"}],
+                    model=llm_config.model_name, timeout=llm_config.timeout,
+                    reasoning_effort=llm_config.reasoning_effort or "medium",
+                )
+                ok = result["content"].strip() == "ASTRA_OK"
+                return {"success": ok, "message": "本机 Codex / Astra 连接成功（ChatGPT 登录）" if ok else "Astra 返回了非预期测试结果",
+                        "response_time": time.time() - start_time,
+                        "details": {"model": llm_config.model_name, "auth": "chatgpt"}}
             logger.info(f"📍 API基础URL (模型配置): {llm_config.api_base}")
 
             # 获取厂家配置（用于获取 API Key 和 default_base_url）
@@ -1256,7 +1267,7 @@ class ConfigService:
                     }
 
             # 🔥 本地模型列表（不需要 API Key）
-            local_models = ["ollama", "localai"]
+            local_models = ["ollama", "localai", "codex"]
             is_local_model = provider_str.lower() in local_models
 
             # 2. 验证 API Key（优先级：厂家配置 > 模型配置 > 环境变量）
@@ -3576,7 +3587,7 @@ class ConfigService:
             logger.info(f"🔍 [get_llm_providers] 从数据库获取到 {len(providers_data)} 个供应商")
 
             # 🔥 本地模型列表（不需要 API Key）
-            local_models = ["ollama", "localai"]
+            local_models = ["ollama", "localai", "codex"]
             
             for provider_data in providers_data:
                 provider = LLMProvider(**provider_data)
@@ -3587,7 +3598,7 @@ class ConfigService:
                 # 🔥 本地模型不需要 API Key，跳过检查
                 if provider.name.lower() in local_models:
                     provider.extra_config["has_api_key"] = True
-                    provider.extra_config["source"] = "local_model"
+                    provider.extra_config["source"] = "chatgpt_login" if provider.name == "codex" else "local_model"
                     provider.extra_config["api_key_required"] = False
                     logger.info(f"✅ [get_llm_providers] 本地模型 {provider.display_name} 不需要 API Key")
                 else:
@@ -4570,6 +4581,11 @@ class ConfigService:
             provider_name = provider_data.get("name")
             api_key = provider_data.get("api_key")
             display_name = provider_data.get("display_name", provider_name)
+
+            if provider_name == "codex":
+                return await self.test_llm_config(LLMConfig(
+                    provider="codex", model_name="gpt-6-astra", timeout=600, retry_times=0,
+                ))
 
             # 🔥 判断数据库中的 API Key 是否有效
             if not self._is_valid_api_key(api_key):

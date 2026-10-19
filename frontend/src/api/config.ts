@@ -47,6 +47,7 @@ export interface LLMConfig {
   temperature: number
   timeout: number
   retry_times: number
+  reasoning_effort?: string
   enabled: boolean
   description?: string
   // 定价配置

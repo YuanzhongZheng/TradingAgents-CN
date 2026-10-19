@@ -86,7 +86,9 @@
         </div>
       </el-form-item>
 
-      <el-form-item label="API基础URL" prop="api_base">
+      <el-alert v-if="formData.provider === 'codex'" type="info" :closable="false" show-icon
+        title="使用本机 Codex 的 ChatGPT 登录，无需 API Key；分析消耗套餐额度。" />
+      <el-form-item v-else label="API基础URL" prop="api_base">
         <el-input
           v-model="formData.api_base"
           placeholder="可选，自定义API端点（留空使用厂家默认地址）"
@@ -106,9 +108,10 @@
           :max="32000"
           :step="100"
         />
+        <span v-if="formData.provider === 'codex'" class="form-tip">正文长度目标，Codex 不保证硬性截断。</span>
       </el-form-item>
 
-      <el-form-item label="温度参数" prop="temperature">
+      <el-form-item v-if="formData.provider !== 'codex'" label="温度参数" prop="temperature">
         <el-input-number
           v-model="formData.temperature"
           :min="0"
@@ -122,13 +125,19 @@
         <el-input-number
           v-model="formData.timeout"
           :min="10"
-          :max="300"
+          :max="formData.provider === 'codex' ? 1800 : 300"
           :step="10"
         />
         <span class="ml-2 text-gray-500">秒</span>
       </el-form-item>
 
-      <el-form-item label="重试次数" prop="retry_times">
+      <el-form-item v-if="formData.provider === 'codex'" label="推理强度">
+        <el-select v-model="formData.reasoning_effort">
+          <el-option v-for="effort in ['low', 'medium', 'high', 'xhigh', 'max']"
+            :key="effort" :label="effort" :value="effort" />
+        </el-select>
+      </el-form-item>
+      <el-form-item v-else label="重试次数" prop="retry_times">
         <el-input-number
           v-model="formData.retry_times"
           :min="0"
@@ -137,9 +146,9 @@
       </el-form-item>
 
       <!-- 定价配置 -->
-      <el-divider content-position="left">定价配置</el-divider>
+      <el-divider v-if="formData.provider !== 'codex'" content-position="left">定价配置</el-divider>
 
-      <el-form-item label="输入价格" prop="input_price_per_1k">
+      <el-form-item v-if="formData.provider !== 'codex'" label="输入价格" prop="input_price_per_1k">
         <el-input-number
           v-model="formData.input_price_per_1k"
           :min="0"
@@ -150,7 +159,7 @@
         <span class="ml-2 text-gray-500">{{ formData.currency || 'CNY' }}/1K tokens</span>
       </el-form-item>
 
-      <el-form-item label="输出价格" prop="output_price_per_1k">
+      <el-form-item v-if="formData.provider !== 'codex'" label="输出价格" prop="output_price_per_1k">
         <el-input-number
           v-model="formData.output_price_per_1k"
           :min="0"
@@ -161,7 +170,7 @@
         <span class="ml-2 text-gray-500">{{ formData.currency || 'CNY' }}/1K tokens</span>
       </el-form-item>
 
-      <el-form-item label="货币单位" prop="currency">
+      <el-form-item v-if="formData.provider !== 'codex'" label="货币单位" prop="currency">
         <el-select v-model="formData.currency" placeholder="选择货币单位">
           <el-option label="人民币 (CNY)" value="CNY" />
           <el-option label="美元 (USD)" value="USD" />
@@ -389,6 +398,7 @@ const defaultFormData = {
   temperature: 0.2,  // 股票分析推荐值：0.2-0.3（快速分析），0.1-0.2（深度分析）
   timeout: 180,  // 默认超时时间改为180秒
   retry_times: 3,
+  reasoning_effort: undefined as string | undefined,
   enabled: true,
   enable_memory: false,
   enable_debug: false,
@@ -514,6 +524,11 @@ const handleProviderChange = async (provider: string) => {
   }
 
   formData.value.model_name = ''
+  if (provider === 'codex') {
+    formData.value.timeout = 600
+    formData.value.retry_times = 0
+    formData.value.reasoning_effort = 'medium'
+  }
   // 清空价格信息
   formData.value.input_price_per_1k = 0
   formData.value.output_price_per_1k = 0

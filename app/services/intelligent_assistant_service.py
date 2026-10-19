@@ -1708,6 +1708,7 @@ def resolve_llm_config_from_config_doc(
 
     provider_str = str(model_config.get("provider") or provider_info.get("provider") or "").lower()
     provider_map = {
+        "codex": LLMProvider.CODEX,
         "openai": LLMProvider.OPENAI, "deepseek": LLMProvider.DEEPSEEK,
         "dashscope": LLMProvider.DASHSCOPE, "qwen": LLMProvider.DASHSCOPE,
         "zhipu": LLMProvider.ZHIPU, "google": LLMProvider.GOOGLE,
@@ -1730,6 +1731,7 @@ def resolve_llm_config_from_config_doc(
         max_tokens=int(model_config.get("max_tokens", 4000)),
         timeout=int(model_config.get("timeout", 60)),
         retry_times=int(model_config.get("retry_times", 3)),
+        reasoning_effort=model_config.get("reasoning_effort"),
     )
 
 

@@ -167,7 +167,7 @@ def create_llm_by_provider(provider: str, model: str, backend_url: str, temperat
         max_tokens: 最大 token 数
         timeout: 超时时间
         api_key: API Key（可选，如果未提供则从环境变量读取）
-        reasoning_effort: 推理模型思考深度 (none/minimal/low/medium/high/xhigh/max)，仅火山方舟推理模型支持
+        reasoning_effort: 推理模型思考深度；本机 Codex Astra 支持 low/medium/high/xhigh/max
 
     Returns:
         LLM 实例
@@ -201,6 +201,11 @@ def create_llm_by_provider(provider: str, model: str, backend_url: str, temperat
         temperature=temperature,
         base_url=backend_url,
     )
+
+    if provider.lower() == "codex":
+        from tradingagents.llm_adapters.codex_adapter import ChatCodex
+        return ChatCodex(model_name=model, timeout=timeout, max_tokens=max_tokens,
+                         reasoning_effort=reasoning_effort or "medium")
 
     logger.info(f"🔧 [创建LLM] provider={provider}, model={model}, url={backend_url}")
     logger.info(f"🔑 [API Key] 传入值: {'有值' if api_key else 'None（将使用环境变量）'}")
@@ -512,10 +517,10 @@ class TradingAgentsGraph:
 
             logger.info(f"✅ [显式模型配置] LLM 实例创建成功")
 
-        elif self.config["llm_provider"].lower() in ["volcengine", "volcengine_coding"]:
-            # 🔧 火山方舟：使用 create_llm_by_provider 支持 reasoning_effort
-            logger.info(f"🔧 [火山方舟] llm_provider={self.config['llm_provider']}")
-            volc_api_key = self.config.get("quick_api_key") or self.config.get("deep_api_key")
+        elif self.config["llm_provider"].lower() in ["volcengine", "volcengine_coding", "codex"]:
+            # 使用统一工厂传递推理强度，并选择相应传输方式。
+            logger.info(f"🔧 [推理模型] llm_provider={self.config['llm_provider']}")
+            provider_api_key = self.config.get("quick_api_key") or self.config.get("deep_api_key")
 
             self.deep_thinking_llm = create_llm_by_provider(
                 provider=self.config["llm_provider"],
@@ -524,7 +529,7 @@ class TradingAgentsGraph:
                 temperature=deep_temperature,
                 max_tokens=deep_max_tokens,
                 timeout=deep_timeout,
-                api_key=volc_api_key,
+                api_key=provider_api_key,
                 reasoning_effort=deep_reasoning_effort
             )
             self.quick_thinking_llm = create_llm_by_provider(
@@ -534,7 +539,7 @@ class TradingAgentsGraph:
                 temperature=quick_temperature,
                 max_tokens=quick_max_tokens,
                 timeout=quick_timeout,
-                api_key=volc_api_key,
+                api_key=provider_api_key,
                 reasoning_effort=quick_reasoning_effort
             )
 

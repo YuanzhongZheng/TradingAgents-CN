@@ -6,6 +6,20 @@
     router
     class="sidebar-menu"
   >
+    <el-menu-item index="/analysis/single">
+      <el-icon><TrendCharts /></el-icon><template #title>研究</template>
+    </el-menu-item>
+    <el-menu-item index="/favorites">
+      <el-icon><Star /></el-icon><template #title>自选</template>
+    </el-menu-item>
+    <el-menu-item index="/reports">
+      <el-icon><Document /></el-icon><template #title>报告</template>
+    </el-menu-item>
+    <el-menu-item :index="isJdyunMode() ? '/settings/jdyun-config' : '/settings/config'">
+      <el-icon><Setting /></el-icon><template #title>设置</template>
+    </el-menu-item>
+    <el-sub-menu index="/more">
+      <template #title><el-icon><MoreFilled /></el-icon><span>更多功能</span></template>
     <el-menu-item index="/dashboard">
       <el-icon><Odometer /></el-icon>
       <template #title>仪表板</template>
@@ -21,10 +35,7 @@
       <template #title>学习中心</template>
     </el-menu-item>
 
-    <el-menu-item index="/analysis/single">
-      <el-icon><TrendCharts /></el-icon>
-      <template #title>单股研究</template>
-    </el-menu-item>
+
 
     <!-- Pro：批量分析（社区版发布时 navigation.pro.ts 整文件替换为空配置，菜单自动隐藏） -->
     <el-menu-item v-for="item in proTopLevelItems" :key="item.path" :index="item.path">
@@ -56,13 +67,10 @@
       <template #title>Skill 中心</template>
     </el-menu-item>
 
-    <el-menu-item index="/reports">
-      <el-icon><Document /></el-icon>
-      <template #title>研究报告</template>
-    </el-menu-item>
+
 
     <!-- Pro：分析流子菜单（社区版发布时自动隐藏，见 navigation.pro.ts） -->
-    <el-sub-menu :index="proWorkflowMenu.path">
+    <el-sub-menu v-if="proWorkflowMenu.children.length" :index="proWorkflowMenu.path">
       <template #title>
         <el-icon><SetUp /></el-icon>
         <span>{{ proWorkflowMenu.label }}</span>
@@ -85,10 +93,7 @@
       <template #title>股票筛选</template>
     </el-menu-item>
 
-    <el-menu-item index="/favorites">
-      <el-icon><Star /></el-icon>
-      <template #title>股票关注列表</template>
-    </el-menu-item>
+
 
     <el-menu-item index="/paper">
       <el-icon><CreditCard /></el-icon>
@@ -117,7 +122,7 @@
     <el-sub-menu index="/settings">
       <template #title>
         <el-icon><Setting /></el-icon>
-        <span>设置</span>
+        <span>高级设置</span>
       </template>
 
       <!-- 个人设置 -->
@@ -145,9 +150,9 @@
       <el-sub-menu index="/settings-config">
         <template #title>系统配置</template>
         <!-- 京东云模式：显示京东云配置状态页（只读），隐藏配置管理 -->
-        <el-menu-item v-if="isJdyunMode()" index="/settings/jdyun-config">系统配置</el-menu-item>
+
         <!-- 非京东云模式：显示完整的配置管理 -->
-        <el-menu-item v-else index="/settings/config">配置管理</el-menu-item>
+
         <el-menu-item index="/settings/cache">缓存管理</el-menu-item>
       </el-sub-menu>
 
@@ -192,6 +197,7 @@
       <el-icon><InfoFilled /></el-icon>
       <template #title>关于</template>
     </el-menu-item>
+    </el-sub-menu>
   </el-menu>
 </template>
 
@@ -212,6 +218,7 @@ import {
   proAdminSettingsItems
 } from '@/config/navigation.pro'
 import {
+  MoreFilled,
   Odometer,
   Reading,
   TrendCharts,

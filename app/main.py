@@ -281,6 +281,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ 启动配置导入失败（不影响服务启动）: {e}", exc_info=True)
 
+    # 本机 Codex 模型：有 CLI 才注册，不覆盖用户原有模型与默认选择。
+    try:
+        from app.core.database import get_mongo_db
+        from app.services.codex_config_service import ensure_codex_config
+        await ensure_codex_config(get_mongo_db())
+    except Exception:
+        logger.exception("本机 Codex 模型注册失败（不影响服务启动）")
+
     # 初始化自定义工具
     try:
         from app.core.database import get_mongo_db

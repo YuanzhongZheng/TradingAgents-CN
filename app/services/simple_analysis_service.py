@@ -222,6 +222,8 @@ def get_provider_and_url_by_model_sync(
 
         def _build_provider_result(config_dict: dict) -> dict:
             provider = str(config_dict.get("provider") or "").strip().lower()
+            if provider == "codex":
+                return {"provider": "codex", "backend_url": "", "api_key": None}
             api_base = config_dict.get("api_base")
             model_api_key = config_dict.get("api_key")
 
@@ -325,6 +327,8 @@ def get_provider_and_url_by_model_sync(
         # 如果数据库中没有找到模型配置，使用默认映射
         logger.warning(f"⚠️ [同步查询] 数据库中未找到模型 {model_name}，使用默认映射")
         provider = _get_default_provider_by_model(model_name)
+        if provider == "codex":
+            return {"provider": "codex", "backend_url": "", "api_key": None}
 
         # 尝试从厂家配置中获取 default_base_url 和 API Key
         try:
@@ -376,6 +380,8 @@ def get_provider_and_url_by_model_sync(
     except Exception as e:
         logger.error(f"❌ [同步查询] 查找模型供应商失败: {e}")
         provider = _get_default_provider_by_model(model_name)
+        if provider == "codex":
+            return {"provider": "codex", "backend_url": "", "api_key": None}
 
         # 尝试从厂家配置中获取 default_base_url 和 API Key
         try:
@@ -472,6 +478,7 @@ def _get_default_backend_url(provider: str) -> str:
         str: 默认的 backend_url
     """
     default_urls = {
+        "codex": "",
         "google": "https://generativelanguage.googleapis.com/v1beta",
         "dashscope": "https://dashscope.aliyuncs.com/api/v1",
         "openai": "https://api.openai.com/v1",
@@ -492,6 +499,8 @@ def _get_default_provider_by_model(model_name: str) -> str:
     根据模型名称返回默认的供应商映射
     这是一个后备方案，当数据库查询失败时使用
     """
+    if model_name == "gpt-6-astra" or model_name.startswith("codex::"):
+        return "codex"
     # 模型名称到供应商的默认映射
     # ⚠️ 注意：这只是后备方案，优先应该从数据库配置中获取
     model_provider_map = {
@@ -539,6 +548,9 @@ def _load_model_config_from_db(model_name: str) -> dict:
     Returns:
         dict: 模型配置字典，如 {"max_tokens": 4000, "temperature": 0.7, "reasoning_effort": "low"}
     """
+    preferred_provider = None
+    if "::" in model_name:
+        preferred_provider, model_name = model_name.split("::", 1)
     try:
         from pymongo import MongoClient
         from app.core.config import settings
@@ -550,7 +562,8 @@ def _load_model_config_from_db(model_name: str) -> dict:
 
         if doc and "llm_configs" in doc:
             for config_dict in doc["llm_configs"]:
-                if config_dict.get("model_name") == model_name:
+                if (config_dict.get("model_name") == model_name
+                        and (not preferred_provider or config_dict.get("provider") == preferred_provider)):
                     result = {
                         "max_tokens": config_dict.get("max_tokens", 4000),
                         "temperature": config_dict.get("temperature", 0.7),

@@ -37,6 +37,7 @@
             </template>
             <!-- 非京东云模式：显示全部菜单 -->
             <template v-else>
+              <el-menu-item index="research"><el-icon><Cpu /></el-icon><span>研究模型</span></el-menu-item>
               <el-menu-item index="providers">
                 <el-icon><OfficeBuilding /></el-icon>
                 <span>厂家管理</span>
@@ -85,6 +86,7 @@
 
       <!-- 右侧：配置内容 -->
       <el-col :span="20">
+        <ResearchDefaults v-if="!isJdyunMode() && activeTab === 'research'" />
         <!-- Gateway 配置（京东云模式下隐藏） -->
         <el-card v-if="!isJdyunMode()" v-show="activeTab === 'gateway'" class="config-content" shadow="never">
           <template #header>
@@ -283,7 +285,7 @@
                       :type="row.extra_config?.has_api_key ? 'success' : 'danger'"
                       size="small"
                     >
-                      {{ row.extra_config?.has_api_key ? '已配置' : '未配置' }}
+                      {{ row.name === 'codex' ? 'ChatGPT 登录' : (row.extra_config?.has_api_key ? '已配置' : '未配置') }}
                     </el-tag>
                   </div>
                 </template>
@@ -1582,6 +1584,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import ResearchDefaults from '@/components/Research/ResearchDefaults.vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { isJdyunMode } from '@/utils/config'
@@ -1625,7 +1628,7 @@ import SortableDataSourceList from './components/SortableDataSourceList.vue'
 
 // 响应式数据
 const router = useRouter()
-const activeTab = ref('providers')
+const activeTab = ref(String(router.currentRoute.value.query.tab || 'research'))
 const providers = ref<LLMProvider[]>([])
 const llmConfigs = ref<LLMConfig[]>([])
 const llmConfigGroups = ref<any[]>([])
@@ -2475,6 +2478,7 @@ const getKeyStatusType = (provider: LLMProvider) => {
 
 // 获取密钥状态文本
 const getKeyStatusText = (provider: LLMProvider) => {
+  if (provider.name === 'codex') return '本机 ChatGPT 登录'
   if (!provider.extra_config?.has_api_key) {
     return '未配置'
   }

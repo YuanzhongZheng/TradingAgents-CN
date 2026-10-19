@@ -35,12 +35,14 @@
     <div class="analysis-container">
       <el-row :gutter="24">
         <!-- 左侧：基础配置 -->
-        <el-col :span="18">
+        <el-col :xs="24" :lg="showAdvanced ? 18 : 24">
           <el-card class="main-form-card" shadow="hover">
             <template #header>
               <div class="card-header">
-                <h3>分析配置</h3>
-                <el-tag type="info" size="small">必填信息</el-tag>
+                <h3>开始研究</h3>
+                <el-button text @click="showAdvanced = !showAdvanced" :aria-expanded="showAdvanced">
+                  {{ showAdvanced ? '收起高级选项' : '高级选项' }}
+                </el-button>
               </div>
             </template>
 
@@ -49,22 +51,23 @@
               <div class="form-section">
                 <h4 class="section-title">📊 {{ analysisForm.market === 'ETF' ? 'ETF信息' : '股票信息' }}</h4>
                 <el-row :gutter="16">
-                  <el-col :span="12">
-                    <el-form-item :label="analysisForm.market === 'ETF' ? 'ETF代码' : '股票代码'" required>
-                      <el-input
+                  <el-col :span="showAdvanced ? 12 : 24">
+                    <el-form-item :label="analysisForm.market === 'ETF' ? 'ETF' : '股票'" required>
+                      <el-autocomplete
+                        :fetch-suggestions="searchStockSuggestions"
+                        :trigger-on-focus="false"
+                        @select="selectStockSuggestion"
                         v-model="analysisForm.stockCode"
-                        placeholder="如：000001、512400(ETF)"
+                        placeholder="输入股票名称或代码，如宁德时代、300750"
                         clearable
                         size="large"
                         class="stock-input"
                         :class="{ 'is-error': stockCodeError }"
-                        @blur="validateStockCodeInput"
                         @input="onStockCodeInput"
                       >
-                        <template #prefix>
-                          <el-icon><TrendCharts /></el-icon>
-                        </template>
-                      </el-input>
+                        <template #prefix><el-icon><TrendCharts /></el-icon></template>
+                        <template #default="{ item }">{{ item.label }}</template>
+                      </el-autocomplete>
                       <div v-if="stockCodeError" class="error-message">
                         <el-icon><WarningFilled /></el-icon>
                         {{ stockCodeError }}
@@ -75,7 +78,7 @@
                       </div>
                     </el-form-item>
                   </el-col>
-                  <el-col :span="12">
+                  <el-col v-show="showAdvanced" :span="12">
                     <el-form-item label="市场类型">
                       <el-select
                         v-model="analysisForm.market"
@@ -97,7 +100,7 @@
                   </el-col>
                 </el-row>
 
-                <el-form-item label="分析日期">
+                <el-form-item v-show="showAdvanced" label="分析日期">
                   <div style="display: flex; align-items: center; gap: 8px; width: 100%">
                     <el-date-picker
                       v-model="analysisForm.analysisDate"
@@ -123,7 +126,7 @@
               </div>
 
               <!-- 分析深度 -->
-              <div class="form-section">
+              <div v-show="showAdvanced" class="form-section">
                 <h4 class="section-title">🎯 分析深度</h4>
                 <div class="depth-selector">
                   <div
@@ -144,7 +147,7 @@
               </div>
 
               <!-- 分析师团队 -->
-              <div class="form-section">
+              <div v-show="showAdvanced" class="form-section">
                 <h4 class="section-title">👥 分析师团队</h4>
                 <div class="analysts-grid">
                   <div
@@ -180,10 +183,16 @@
                 </div>
               </div>
 
+              <el-alert v-if="modelLoadError" :title="modelLoadError" type="error" :closable="false" />
+              <div class="research-summary">
+                <span>{{ getDepthDescription(analysisForm.researchDepth) }}分析 · {{ analysisForm.selectedAnalysts.length }} 个分析维度 · {{ modelSettings.quickAnalysisModel === modelSettings.deepAnalysisModel ? (availableModels.find(model => model.model_name === modelSettings.quickAnalysisModel)?.model_display_name || modelSettings.quickAnalysisModel) : '组合模型' }}</span>
+                <span>数据截至 {{ formatResearchDate(analysisForm.analysisDate) }}</span>
+              </div>
+              <ResearchDefaults v-if="!showAdvanced" compact @saved="initializeModelSettings" />
               <!-- 操作按钮 -->
               <div class="form-section">
                 <!-- 执行轨迹开关 -->
-                <div style="display: flex; justify-content: center; margin-bottom: 12px;">
+                <div v-show="showAdvanced" style="display: flex; justify-content: center; margin-bottom: 12px;">
                   <el-tooltip
                     content="开启后，系统会记录每个 Agent 的完整执行过程（Prompt全文、LLM原始返回、校验结果），用于排查分析问题。数据量较大，平时不需要时建议关闭。"
                     placement="top"
@@ -202,7 +211,7 @@
                     size="large"
                     @click="submitAnalysis"
                     :loading="submitting"
-                    :disabled="!analysisForm.stockCode.trim()"
+                    :disabled="!analysisForm.stockCode.trim() || !modelsReady"
                     class="submit-btn large-analysis-btn"
                     style="width: 280px; height: 56px; font-size: 18px; font-weight: 700; border-radius: 16px;"
                   >
@@ -387,7 +396,7 @@
         </el-col>
 
         <!-- 右侧：高级配置 -->
-        <el-col :span="6">
+        <el-col v-show="showAdvanced" :xs="24" :lg="6">
           <el-card class="config-card" shadow="hover">
             <template #header>
               <div class="card-header">
@@ -823,6 +832,8 @@
 </template>
 
 <script setup lang="ts">
+import ResearchDefaults from '@/components/Research/ResearchDefaults.vue'
+import { searchStocks } from '@/api/multiMarket'
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -957,6 +968,41 @@ const generateStepsFromBackend = (backendSteps: any[]) => {
     description: step.description || '处理中...',
     status: 'pending'
   }))
+}
+
+const showAdvanced = ref(false)
+const modelsReady = ref(false)
+const modelLoadError = ref('')
+const formatResearchDate = (value: Date | string) => {
+  const date = new Date(value)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+let stockSearchVersion = 0
+const searchStockSuggestions = async (query: string) => {
+  const version = ++stockSearchVersion
+  if (!query.trim()) return []
+  try {
+    const response = await searchStocks('CN', query.trim(), 10)
+    if (version !== stockSearchVersion) return []
+    return (response.data?.stocks || []).map(stock => ({ value: stock.code, label: `${stock.name} · ${stock.code}` }))
+  } catch {
+    return []
+  }
+}
+const selectStockSuggestion = (stock: Record<string, any>) => {
+  analysisForm.stockCode = stock.value
+  inferMarketFromCode()
+  validateStockCodeInput()
+}
+const inferMarketFromCode = () => {
+  const code = analysisForm.stockCode.trim()
+  if (/^\d{6}$/.test(code)) {
+    const market = validateStockCode(code, 'ETF').valid ? 'ETF' : 'A股'
+    if (analysisForm.market !== market) {
+      analysisForm.market = market
+      analysisForm.selectedAnalysts = normalizeSelectedAnalystsForMarket(market, analysisForm.selectedAnalysts)
+    }
+  }
 }
 
 // 模型设置
@@ -1102,12 +1148,14 @@ const fetchFactorPreview = async (normalizedCode?: string) => {
 }
 
 // 股票代码输入时的处理
-const onStockCodeInput = () => {
+const onStockCodeInput = (value: string) => {
+  analysisForm.stockCode = value
+  if (!showAdvanced.value) inferMarketFromCode()
   // 清除错误信息
   stockCodeError.value = ''
   clearFactorPreview()
   // 显示格式提示
-  stockCodeHelp.value = getStockCodeFormatHelp(analysisForm.market)
+  stockCodeHelp.value = /[^0-9]/.test(analysisForm.stockCode) ? '请从搜索结果中选择股票，或直接输入六位代码。' : getStockCodeFormatHelp(analysisForm.market)
 }
 
 const ETF_ANALYST_NAMES = ['ETF分析师', '市场分析师', '新闻分析师']
@@ -1177,6 +1225,7 @@ const validateStockCodeInput = () => {
     return
   }
 
+  if (!showAdvanced.value) inferMarketFromCode()
   // 验证股票代码格式
   let validation = validateStockCode(code, analysisForm.market)
 
@@ -1528,6 +1577,11 @@ const formatValidationDetails = (details: any) => {
 
 // 提交分析
 const submitAnalysis = async () => {
+  if (!modelsReady.value) {
+    ElMessage.warning('请先加载有效的研究模型配置')
+    return
+  }
+  if (!showAdvanced.value) inferMarketFromCode()
   const stockCode = analysisForm.stockCode.trim()
   if (!stockCode) {
     ElMessage.warning('请输入股票代码')
@@ -1611,7 +1665,7 @@ const submitAnalysis = async () => {
       stock_code: analysisForm.symbol,  // 兼容字段
       parameters: {
         market_type: analysisForm.market,
-        analysis_date: analysisDate.toISOString().split('T')[0],
+        analysis_date: formatResearchDate(analysisDate),
         research_depth: getDepthDescription(analysisForm.researchDepth),
         selected_analysts: convertAnalystNamesToIds(analysisForm.selectedAnalysts),
         include_sentiment: analysisForm.includeSentiment,
@@ -2549,8 +2603,15 @@ const updateAnalysisSteps = (status: any) => {
   console.log('📋 步骤状态更新完成:', statusSummary)
 }
 
+watch(() => [modelSettings.value.quickAnalysisModel, modelSettings.value.deepAnalysisModel], names => {
+  modelsReady.value = names.every(name => availableModels.value.some(model => model.model_name === name || `${model.provider}::${model.model_name}` === name))
+  if (modelsReady.value) modelLoadError.value = ''
+})
+
 // 初始化模型设置
 const initializeModelSettings = async () => {
+  modelsReady.value = false
+  modelLoadError.value = ''
   try {
     // 获取默认模型
     const defaultModels = await configApi.getDefaultModels()
@@ -2560,6 +2621,10 @@ const initializeModelSettings = async () => {
     // 获取所有可用的模型列表
     const llmConfigs = await configApi.getLLMConfigs()
     availableModels.value = llmConfigs.filter((config: any) => config.enabled)
+    modelsReady.value = [modelSettings.value.quickAnalysisModel, modelSettings.value.deepAnalysisModel].every(
+      name => availableModels.value.some(model => model.model_name === name || `${model.provider}::${model.model_name}` === name)
+    )
+    if (!modelsReady.value) modelLoadError.value = '默认研究模型尚未配置或已停用，请在下方设置 Astra，或在高级选项中选择模型。'
 
     console.log('✅ 加载模型配置成功:', {
       quick: modelSettings.value.quickAnalysisModel,
@@ -2573,8 +2638,7 @@ const initializeModelSettings = async () => {
     })))
   } catch (error) {
     console.error('加载默认模型配置失败:', error)
-    modelSettings.value.quickAnalysisModel = 'qwen-turbo'
-    modelSettings.value.deepAnalysisModel = 'qwen-max'
+    modelLoadError.value = '无法加载研究模型，请检查后端连接后刷新页面。'
   }
 }
 
@@ -2963,6 +3027,9 @@ onMounted(async () => {
 </script>
 
 <style lang="scss" scoped>
+.research-summary { display: flex; flex-wrap: wrap; gap: 8px 20px; color: var(--el-text-color-secondary); margin: 12px 0; font-size: 13px; }
+.stock-input { width: 100%; }
+
 .single-analysis {
   min-height: 100vh;
   background: var(--el-bg-color-page);
@@ -3012,8 +3079,8 @@ onMounted(async () => {
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
 
       :deep(.el-card__header) {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        background: var(--el-fill-color-light);
+        color: var(--el-text-color-primary);
         border-radius: 16px 16px 0 0;
         padding: 20px 24px;
 

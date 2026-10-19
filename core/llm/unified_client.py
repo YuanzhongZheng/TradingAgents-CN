@@ -19,6 +19,7 @@ from core.utils.retry import is_retryable as _is_retryable, retry_sync, retry_as
 from .models import LLMConfig, LLMProvider, LLMResponse, Message, ToolCall, ToolResult
 from .providers.base import BaseAdapter
 from .providers.openai_compat import OpenAICompatAdapter
+from .providers.codex import CodexAdapter
 
 # 可选适配器
 try:
@@ -60,6 +61,7 @@ class UnifiedLLMClient:
     def _get_adapter_map(cls) -> Dict[LLMProvider, type]:
         """动态构建适配器映射（根据可用性）"""
         adapter_map = {
+            LLMProvider.CODEX: CodexAdapter,
             LLMProvider.OPENAI: OpenAICompatAdapter,
             LLMProvider.DEEPSEEK: OpenAICompatAdapter,
             LLMProvider.DASHSCOPE: OpenAICompatAdapter,

@@ -614,7 +614,7 @@ async def get_llm_providers(
                     api_secret=api_secret_display,
                     extra_config={
                         **provider.extra_config,
-                        "has_api_key": bool(api_key_display),
+                        "has_api_key": bool(api_key_display) or provider.extra_config.get("api_key_required") is False,
                         "has_api_secret": bool(api_secret_display)
                     },
                     created_at=provider.created_at,

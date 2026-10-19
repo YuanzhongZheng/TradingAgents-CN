@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 class LLMProvider(str, Enum):
     """LLM 提供商枚举"""
     OPENAI = "openai"
+    CODEX = "codex"
     DEEPSEEK = "deepseek"
     DASHSCOPE = "dashscope"  # 通义千问
     ZHIPU = "zhipu"          # 智谱AI
@@ -85,6 +86,7 @@ class LLMConfig(BaseModel):
     max_tokens: Optional[int] = None
     timeout: int = 180
     retry_times: int = 3
+    reasoning_effort: Optional[str] = None
     
     # 高级配置
     top_p: Optional[float] = None
@@ -107,6 +109,7 @@ class LLMConfig(BaseModel):
         logger = logging.getLogger(__name__)
         
         config_map = {
+            LLMProvider.CODEX: {"model": "gpt-6-astra", "timeout": 600, "retry_times": 0},
             LLMProvider.OPENAI: {
                 "api_key": os.getenv("OPENAI_API_KEY"),
                 "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
@@ -144,7 +147,7 @@ class LLMConfig(BaseModel):
         api_key = config_data.get("api_key")
         
         # 🔥 检查 API key 是否存在，如果不存在则记录警告
-        if not api_key:
+        if not api_key and provider != LLMProvider.CODEX:
             env_key_map = {
                 LLMProvider.OPENAI: "OPENAI_API_KEY",
                 LLMProvider.DEEPSEEK: "DEEPSEEK_API_KEY",

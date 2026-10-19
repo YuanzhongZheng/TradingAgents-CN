@@ -92,6 +92,13 @@ ANALYSIS_DEPTH_REQUIREMENTS = {
 
 # 常见模型的默认能力配置（用于初始化和参考）
 DEFAULT_MODEL_CAPABILITIES: Dict[str, Dict[str, Any]] = {
+    "gpt-6-astra": {
+        "capability_level": 5,
+        "suitable_roles": [ModelRole.BOTH],
+        "features": [ModelFeature.TOOL_CALLING, ModelFeature.LONG_CONTEXT, ModelFeature.REASONING],
+        "recommended_depths": ["快速", "基础", "标准", "深度", "全面"],
+        "description": "Astra，可通过本机 Codex 参与数据收集、分析和研究综合",
+    },
     # ==================== 阿里百炼 (DashScope) ====================
     "qwen-turbo": {
         "capability_level": 1,
