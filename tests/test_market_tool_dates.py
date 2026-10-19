@@ -43,6 +43,7 @@ def test_unified_market_tool_emits_actual_data_date_context(monkeypatch):
         captured["args"] = (ticker, start_date, end_date)
         return "MOCK_STOCK_DATA"
 
+    module._MARKET_RESULT_CACHE.clear()
     monkeypatch.setattr(stock_utils_module, "StockUtils", FakeStockUtils)
     monkeypatch.setattr(interface_module, "get_china_stock_data_unified", fake_get_china_stock_data_unified)
     monkeypatch.setattr(module, "_ensure_fresh_china_data", lambda ticker: None)
@@ -68,6 +69,26 @@ def test_unified_market_tool_emits_actual_data_date_context(monkeypatch):
     assert "**请求分析日期**: 2026-04-13" in result
     assert "**实际数据日期**: 2026-04-10" in result
     assert "盘前时段" in result
+
+
+def test_unified_market_tool_reuses_recent_result(monkeypatch):
+    from core.tools.implementations.market import stock_market_data as module
+
+    module._MARKET_RESULT_CACHE.clear()
+    calls = {"count": 0}
+
+    def fake_load(ticker, start_date, end_date):
+        calls["count"] += 1
+        return f"{ticker}:{start_date}:{end_date}"
+
+    monkeypatch.setattr(module, "_load_unified_market_data", fake_load)
+    payload = {"ticker": "000001.SZ", "start_date": "2026-04-10", "end_date": "2026-04-10"}
+
+    first = module.get_stock_market_data_unified.invoke(payload)
+    second = module.get_stock_market_data_unified.invoke(payload)
+
+    assert first == second == "000001.SZ:2026-04-10:2026-04-10"
+    assert calls["count"] == 1
 
 
 def test_format_stock_data_response_includes_actual_data_date_note():

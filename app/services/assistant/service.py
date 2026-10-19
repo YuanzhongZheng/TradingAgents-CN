@@ -618,7 +618,7 @@ class IntelligentAssistantService:
         async def _do_chat(_retry_attempt: int = 0) -> str:
             tool_interceptor = self._build_tool_interceptor(conversation_id or "default")
             achat_kwargs: Dict[str, Any] = dict(
-                tools=self._openai_tools,
+                tools=select_assistant_tools(self._openai_tools or [], user_message),
                 auto_execute_tools=True,
                 max_tool_rounds=8,
                 tools_used=tools_used,
@@ -1082,6 +1082,7 @@ from app.services.assistant.tools import (
     _matches_generated_skill,
     _rewrite_number_selection_reply,
     _should_use_recent_search,
+    select_assistant_tools,
 )
 from app.services.assistant.prompts import (
     _get_system_prompt,

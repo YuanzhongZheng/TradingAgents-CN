@@ -9,6 +9,8 @@ import concurrent.futures
 import json
 import logging
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Annotated, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -18,6 +20,44 @@ from core.tools.base import register_tool
 
 logger = logging.getLogger(__name__)
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
+_MARKET_RESULT_TTL_SECONDS = 180
+_MARKET_RESULT_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
+_MARKET_RESULT_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+_MARKET_CACHE_GUARD = threading.Lock()
+
+
+def _market_cache_key(ticker: str, start_date: str, end_date: str) -> tuple[str, str, str]:
+    normalized = re.sub(r"\.(SZ|SH|BJ|sz|sh|bj)$", "", (ticker or "").strip())
+    return (normalized, start_date or "", end_date or "")
+
+
+def _market_cache_lock(key: tuple[str, str, str]) -> threading.Lock:
+    with _MARKET_CACHE_GUARD:
+        lock = _MARKET_RESULT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _MARKET_RESULT_LOCKS[key] = lock
+        return lock
+
+
+def _cached_market_result(key: tuple[str, str, str]) -> Optional[str]:
+    item = _MARKET_RESULT_CACHE.get(key)
+    if item is None:
+        return None
+    stored_at, value = item
+    if time.monotonic() - stored_at > _MARKET_RESULT_TTL_SECONDS:
+        _MARKET_RESULT_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _store_market_result(key: tuple[str, str, str], value: str) -> None:
+    if not value or value.startswith("统一市场数据工具执行失败"):
+        return
+    if len(_MARKET_RESULT_CACHE) > 64:
+        oldest = min(_MARKET_RESULT_CACHE, key=lambda item: _MARKET_RESULT_CACHE[item][0])
+        _MARKET_RESULT_CACHE.pop(oldest, None)
+    _MARKET_RESULT_CACHE[key] = (time.monotonic(), value)
 
 
 def _get_china_now() -> datetime:
@@ -262,20 +302,7 @@ def _ensure_fresh_china_data(ticker: str, data_source: Optional[str] = None) -> 
         )
 
 
-@tool
-@register_tool(
-    tool_id="get_stock_market_data_unified",
-    name="统一股票市场数据",
-    description="获取股票市场数据和技术指标，支持A股、港股、美股，返回K线数据、成交量、技术指标和基础行情快照等数据",
-    category="market",
-    is_online=True,
-    auto_register=True,
-    capability_tags=["stock_market_data", "market_data", "stock_price", "price_history", "market_quote", "technical_indicators"],
-    tool_role_hint="general",
-    output_shape="markdown",
-    preferred_for=["stock_market_data_retrieval", "price_history_analysis", "multi_market_data_query"],
-)
-def get_stock_market_data_unified(
+def _load_unified_market_data(
     ticker: Annotated[str, "股票代码（支持A股、港股、美股）"],
     start_date: Annotated[str, "开始日期，格式：YYYY-MM-DD。注意：系统会自动扩展到配置的回溯天数（通常为365天），你只需要传递分析日期即可"],
     end_date: Annotated[str, "结束日期，格式：YYYY-MM-DD。通常与start_date相同，传递当前分析日期即可"]
@@ -430,4 +457,60 @@ def get_stock_market_data_unified(
         error_msg = f"统一市场数据工具执行失败: {str(e)}"
         logger.error(f"❌ [统一市场工具] {error_msg}")
         return error_msg
+
+
+@tool
+@register_tool(
+    tool_id="get_stock_market_data_unified",
+    name="统一股票市场数据",
+    description="获取股票市场数据和技术指标，支持A股、港股、美股，返回K线数据、成交量、技术指标和基础行情快照等数据",
+    category="market",
+    is_online=True,
+    auto_register=True,
+    capability_tags=["stock_market_data", "market_data", "stock_price", "price_history", "market_quote", "technical_indicators"],
+    tool_role_hint="general",
+    output_shape="markdown",
+    preferred_for=["stock_market_data_retrieval", "price_history_analysis", "multi_market_data_query"],
+)
+def get_stock_market_data_unified(
+    ticker: Annotated[str, "股票代码（支持A股、港股、美股）"],
+    start_date: Annotated[str, "开始日期，格式：YYYY-MM-DD。注意：系统会自动扩展到配置的回溯天数（通常为365天），你只需要传递分析日期即可"],
+    end_date: Annotated[str, "结束日期，格式：YYYY-MM-DD。通常与start_date相同，传递当前分析日期即可"]
+) -> str:
+    """
+    统一的股票市场数据工具
+    自动识别股票类型（A股、港股、美股）并调用相应的数据源获取价格和技术指标数据
+
+    ⚠️ 重要：系统会自动扩展日期范围到配置的回溯天数（通常为365天），以确保技术指标计算有足够的历史数据。
+    你只需要传递当前分析日期作为 start_date 和 end_date 即可，无需手动计算历史日期范围。
+
+    Args:
+        ticker: 股票代码（如：000001、0700.HK、AAPL）
+        start_date: 开始日期（格式：YYYY-MM-DD）。传递当前分析日期即可，系统会自动扩展
+        end_date: 结束日期（格式：YYYY-MM-DD）。传递当前分析日期即可
+
+    Returns:
+        str: 市场数据和技术分析报告
+
+    示例：
+        如果分析日期是 2025-11-09，传递：
+        - ticker: "00700.HK"
+        - start_date: "2025-11-09"
+        - end_date: "2025-11-09"
+        系统会自动获取 2024-11-09 到 2025-11-09 的365天历史数据
+    """
+    key = _market_cache_key(ticker, start_date, end_date)
+    cached = _cached_market_result(key)
+    if cached is not None:
+        logger.info("📈 [统一市场工具] 命中短时缓存: %s %s~%s", key[0], key[1], key[2])
+        return cached
+
+    with _market_cache_lock(key):
+        cached = _cached_market_result(key)
+        if cached is not None:
+            logger.info("📈 [统一市场工具] 等待后命中短时缓存: %s", key[0])
+            return cached
+        result = _load_unified_market_data(ticker, start_date, end_date)
+        _store_market_result(key, result)
+        return result
 

@@ -220,6 +220,76 @@ def _domain_terms(text: str) -> set:
     return terms
 
 
+# 每次对话都带上的工具。其余工具按问题和描述的领域词交集补充，
+# 避免把全部工具 schema 塞进首轮推理。
+_CORE_ASSISTANT_TOOL_NAMES = frozenset({
+    "get_stock_market_data_unified",
+    "get_technical_indicators",
+    "get_technical_factor_bundle_tool",
+    "get_stock_fundamentals_unified",
+    "get_stock_news_unified",
+    "get_stock_news_headlines_unified",
+    "get_stock_sentiment_unified",
+    "get_china_market_overview",
+    "search_recent_information",
+    "web_search",
+    "fetch_url",
+    "search_user_manual",
+    "read_user_manual_section",
+    "get_data_sync_status",
+    "sync_single_stock_data",
+    "get_paper_trading_status",
+    "get_token_usage",
+    "get_running_tasks",
+    "get_user_current_state",
+    "get_system_status",
+    "get_user_recent_activity",
+    "search_reports",
+    "get_latest_report",
+    "get_report_detail",
+    "trigger_stock_analysis",
+    "get_analysis_status",
+    "list_positions",
+    "get_position_analysis",
+    "remember_this",
+})
+_ASSISTANT_TOOL_SOFT_LIMIT = 64
+_ASSISTANT_EXTRA_TOOL_LIMIT = 24
+
+
+def select_assistant_tools(openai_tools: List[Dict[str, Any]], user_message: str) -> List[Dict[str, Any]]:
+    """收窄本轮发给模型的工具表。
+
+    常用行情、财务、新闻和系统工具始终保留。问题和工具描述至少有两个领域词重合时，
+    再补上对应工具。工具本来就不多时保持原样。
+    """
+    if not openai_tools or len(openai_tools) <= _ASSISTANT_TOOL_SOFT_LIMIT:
+        return openai_tools
+
+    message_terms = _domain_terms(user_message)
+    core: List[Dict[str, Any]] = []
+    ranked: List[tuple] = []
+    for tool in openai_tools:
+        function = tool.get("function") or {}
+        name = str(function.get("name") or "")
+        if name in _CORE_ASSISTANT_TOOL_NAMES:
+            core.append(tool)
+            continue
+        description = f"{name} {function.get('description') or ''}"
+        overlap = message_terms & _domain_terms(description)
+        if len(overlap) >= 2:
+            ranked.append((len(overlap), name, tool))
+
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    extra = [item[2] for item in ranked[:_ASSISTANT_EXTRA_TOOL_LIMIT]]
+    selected = core + extra
+    logger.info(
+        "[智能助手] 工具表从 %d 收窄到 %d（常驻 %d，问题匹配 %d）",
+        len(openai_tools), len(selected), len(core), len(extra),
+    )
+    return selected
+
+
 def _matches_generated_skill(user_message: str) -> Optional[tuple]:
     """判断问题是否能被某个「用户生成的外部 Skill」结构化承接。
 
