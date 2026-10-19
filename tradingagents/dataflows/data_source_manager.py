@@ -1167,65 +1167,41 @@ class DataSourceManager:
         logger.info(f"📊 [DataFrame接口] 获取股票数据: {symbol} ({start_date} 到 {end_date})")
 
         try:
-            # 尝试当前数据源
-            df = None
-            if self.current_source == ChinaDataSource.MONGODB:
-                from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                adapter = get_mongodb_cache_adapter()
-                df = adapter.get_historical_data(symbol, start_date, end_date, period=period)
-            elif self.current_source == ChinaDataSource.TUSHARE:
-                from .providers.china.tushare import get_tushare_provider
-                provider = get_tushare_provider()
-                df = provider.get_daily_data(symbol, start_date, end_date)
-            elif self.current_source == ChinaDataSource.AKSHARE:
-                from .providers.china.akshare import get_akshare_provider
-                provider = get_akshare_provider()
-                df = provider.get_stock_data(symbol, start_date, end_date)
-            elif self.current_source == ChinaDataSource.BAOSTOCK:
-                from .providers.china.baostock import get_baostock_provider
-                provider = get_baostock_provider()
-                df = provider.get_stock_data(symbol, start_date, end_date)
-
-            if df is not None and not df.empty:
-                logger.info(f"✅ [DataFrame接口] 从 {self.current_source.value} 获取成功: {len(df)}条")
-                return self._standardize_dataframe(df)
-
-            # 降级到其他数据源
-            logger.warning(f"⚠️ [DataFrame接口] {self.current_source.value} 失败，尝试降级")
-            for source in self.available_sources:
-                if source == self.current_source:
-                    continue
-                try:
-                    if source == ChinaDataSource.MONGODB:
-                        from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
-                        adapter = get_mongodb_cache_adapter()
-                        df = adapter.get_historical_data(symbol, start_date, end_date, period=period)
-                    elif source == ChinaDataSource.TUSHARE:
-                        from .providers.china.tushare import get_tushare_provider
-                        provider = get_tushare_provider()
-                        df = provider.get_daily_data(symbol, start_date, end_date)
-                    elif source == ChinaDataSource.AKSHARE:
-                        from .providers.china.akshare import get_akshare_provider
-                        provider = get_akshare_provider()
-                        df = provider.get_stock_data(symbol, start_date, end_date)
-                    elif source == ChinaDataSource.BAOSTOCK:
-                        from .providers.china.baostock import get_baostock_provider
-                        provider = get_baostock_provider()
-                        df = provider.get_stock_data(symbol, start_date, end_date)
-
-                    if df is not None and not df.empty:
-                        logger.info(f"✅ [DataFrame接口] 降级到 {source.value} 成功: {len(df)}条")
-                        return self._standardize_dataframe(df)
-                except Exception as e:
-                    logger.warning(f"⚠️ [DataFrame接口] {source.value} 失败: {e}")
-                    continue
-
+            frame, source = self._read_shared_history_frame(symbol, start_date, end_date, period)
+            if frame is not None and not frame.empty:
+                logger.info(f"✅ [DataFrame接口] 从共享读路径获取成功: {source} {len(frame)}条")
+                return frame
             logger.error(f"❌ [DataFrame接口] 所有数据源都失败: {symbol}")
             return pd.DataFrame()
-
         except Exception as e:
             logger.error(f"❌ [DataFrame接口] 获取失败: {e}", exc_info=True)
             return pd.DataFrame()
+
+    def _read_shared_history_frame(self, symbol: str, start_date: str = None, end_date: str = None, period: str = "daily") -> tuple:
+        """通过同步适配器管理器读取行情，保证分析和同步使用同一优先级。"""
+        from app.services.data_sources.manager import get_app_data_source_manager
+
+        frame, source = get_app_data_source_manager().read_historical_bars(
+            symbol, start_date, end_date, period
+        )
+        if frame is None or getattr(frame, "empty", True):
+            return pd.DataFrame(), None
+        return self._standardize_dataframe(frame), source
+
+    def _read_shared_history_report(
+        self,
+        symbol: str,
+        start_date: str = None,
+        end_date: str = None,
+        period: str = "daily",
+    ) -> tuple[str, str | None]:
+        frame, source = self._read_shared_history_frame(symbol, start_date, end_date, period)
+        if frame is None or frame.empty:
+            return f"❌ 所有数据源都无法获取{symbol}的{period}数据", None
+        stock_name = f"股票{symbol}"
+        if "name" in frame.columns and not frame["name"].empty:
+            stock_name = frame["name"].iloc[0]
+        return self._format_stock_data_response(frame, symbol, stock_name, start_date, end_date), source
 
     def _standardize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1304,28 +1280,9 @@ class DataSourceManager:
         start_time = time.time()
 
         try:
-            # 根据数据源调用相应的获取方法
-            actual_source = None  # 实际使用的数据源
-
-            if self.current_source == ChinaDataSource.MONGODB:
-                result, actual_source = self._get_mongodb_data(symbol, start_date, end_date, period)
-            elif self.current_source == ChinaDataSource.LOCAL:
-                result = self._get_local_data(symbol, start_date, end_date, period)
-                actual_source = "local"
-            elif self.current_source == ChinaDataSource.TUSHARE:
-                logger.info(f"🔍 [股票代码追踪] 调用 Tushare 数据源，传入参数: symbol='{symbol}', period='{period}'")
-                result = self._get_tushare_data(symbol, start_date, end_date, period)
-                actual_source = "tushare"
-            elif self.current_source == ChinaDataSource.AKSHARE:
-                result = self._get_akshare_data(symbol, start_date, end_date, period)
-                actual_source = "akshare"
-            elif self.current_source == ChinaDataSource.BAOSTOCK:
-                result = self._get_baostock_data(symbol, start_date, end_date, period)
-                actual_source = "baostock"
-            # TDX 已移除
-            else:
-                result = f"❌ 不支持的数据源: {self.current_source.value}"
-                actual_source = None
+            result, actual_source = self._read_shared_history_report(
+                symbol, start_date, end_date, period
+            )
 
             result, normalized_source = self._normalize_stock_data_result(result)
             if normalized_source:
@@ -1367,15 +1324,8 @@ class DataSourceManager:
                                   'event_type': 'data_fetch_warning'
                               })
 
-                # 数据质量异常时也尝试降级到其他数据源
-                fallback_result = self._try_fallback_sources(symbol, start_date, end_date)
-                fallback_result, fallback_source = self._normalize_stock_data_result(fallback_result)
-                if fallback_result and "❌" not in fallback_result and "错误" not in fallback_result:
-                    logger.info(f"✅ [数据来源: {fallback_source or '备用数据源'}] 降级成功获取数据: {symbol}")
-                    return fallback_result
-                else:
-                    logger.error(f"❌ [数据来源: 所有数据源失败] 所有数据源都无法获取有效数据: {symbol}")
-                    return result  # 返回原始结果（包含错误信息）
+                logger.error(f"❌ [数据来源: 所有数据源失败] 共享读路径未取得有效数据: {symbol}")
+                return result
 
         except Exception as e:
             duration = time.time() - start_time
@@ -1732,41 +1682,8 @@ class DataSourceManager:
         Returns:
             tuple[str, str | None]: (结果字符串, 实际使用的数据源名称)
         """
-        logger.info(f"🔄 [{self.current_source.value}] 失败，尝试备用数据源获取{period}数据: {symbol}")
-
-        # 🔥 从数据库获取数据源优先级顺序（根据股票代码识别市场）
-        # 注意：不包含MongoDB，因为MongoDB是最高优先级，如果失败了就不再尝试
-        fallback_order = self._get_data_source_priority_order(symbol)
-
-        for source in fallback_order:
-            if source != self.current_source and source in self.available_sources:
-                try:
-                    logger.info(f"🔄 [备用数据源] 尝试 {source.value} 获取{period}数据: {symbol}")
-
-                    # 直接调用具体的数据源方法，避免递归
-                    if source == ChinaDataSource.TUSHARE:
-                        result = self._get_tushare_data(symbol, start_date, end_date, period)
-                    elif source == ChinaDataSource.AKSHARE:
-                        result = self._get_akshare_data(symbol, start_date, end_date, period)
-                    elif source == ChinaDataSource.BAOSTOCK:
-                        result = self._get_baostock_data(symbol, start_date, end_date, period)
-                    # TDX 已移除
-                    else:
-                        logger.warning(f"⚠️ 未知数据源: {source.value}")
-                        continue
-
-                    if "❌" not in result:
-                        logger.info(f"✅ [备用数据源-{source.value}] 成功获取{period}数据: {symbol}")
-                        return result, source.value  # 返回结果和实际使用的数据源
-                    else:
-                        logger.warning(f"⚠️ [备用数据源-{source.value}] 返回错误结果: {symbol}")
-
-                except Exception as e:
-                    logger.error(f"❌ [备用数据源-{source.value}] 获取失败: {symbol}, 错误: {e}")
-                    continue
-
-        logger.error(f"❌ [所有数据源失败] 无法获取{period}数据: {symbol}")
-        return f"❌ 所有数据源都无法获取{symbol}的{period}数据", None
+        logger.info(f"🔄 [{self.current_source.value}] 失败，改走共享读路径获取{period}数据: {symbol}")
+        return self._read_shared_history_report(symbol, start_date, end_date, period)
 
     def get_stock_info(self, symbol: str) -> Dict:
         """
@@ -2668,16 +2585,6 @@ def get_china_stock_info_unified(symbol: str) -> Dict:
     manager = get_data_source_manager()
     return manager.get_stock_info(symbol)
 
-
-# 全局数据源管理器实例
-_data_source_manager = None
-
-def get_data_source_manager() -> DataSourceManager:
-    """获取全局数据源管理器实例"""
-    global _data_source_manager
-    if _data_source_manager is None:
-        _data_source_manager = DataSourceManager()
-    return _data_source_manager
 
 # ==================== 兼容性接口 ====================
 # 为了兼容 stock_data_service，提供相同的接口

@@ -396,3 +396,163 @@ class DataSourceManager:
                 logger.error(f"Failed to fetch daily OHLC from {adapter.name}: {e}")
                 continue
         return None, None
+
+    def read_historical_bars(
+        self,
+        symbol: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        period: str = "daily",
+        cache_reader=None,
+    ) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+        """分析与同步共用的行情读路径。
+
+        先读同步写入的 Mongo 缓存；没有覆盖请求区间时，按适配器优先级拉取并写回。
+        """
+        reader = cache_reader or _read_mongo_history
+        try:
+            cached = reader(symbol, start_date, end_date, period)
+        except Exception as exc:
+            logger.warning("读取行情缓存失败，改为按适配器拉取: %s", exc)
+            cached = None
+        if cached is not None and not getattr(cached, "empty", True):
+            return cached, "mongodb"
+
+        items, source = self.get_kline_with_fallback(
+            code=_normalize_symbol(symbol),
+            period=_kline_period(period),
+            limit=_history_bar_limit(start_date, end_date, period),
+        )
+        if not items or not source:
+            return None, None
+
+        frame = _normalize_bar_units(
+            _filter_frame_by_dates(_bars_to_frame(items), start_date, end_date),
+            source,
+        )
+        if frame is None or frame.empty:
+            return None, None
+        self._write_historical_bars(symbol, frame, source, period)
+        return frame, source
+
+    def _write_historical_bars(self, symbol: str, frame: pd.DataFrame, source: str, period: str) -> None:
+        """把适配器拉到的行情按同步集合的键写回，不覆盖已有记录。"""
+        if source in {"mongodb", "local"}:
+            return
+        try:
+            from pymongo import UpdateOne
+            from app.core.database import get_mongo_db_sync
+            from app.services.historical_data_service import HistoricalDataService
+
+            code = _normalize_symbol(symbol)
+            prepared = frame.copy()
+            if "date" in prepared.columns and "trade_date" not in prepared.columns:
+                prepared["trade_date"] = prepared["date"]
+
+            service = HistoricalDataService()
+            operations = []
+            for index, row in prepared.iterrows():
+                document = service._standardize_record(code, row, source, "CN", period, index)
+                operations.append(UpdateOne(
+                    {
+                        "symbol": document["symbol"],
+                        "trade_date": document["trade_date"],
+                        "data_source": document["data_source"],
+                        "period": document["period"],
+                    },
+                    {"$setOnInsert": document},
+                    upsert=True,
+                ))
+            if operations:
+                get_mongo_db_sync().stock_daily_quotes.bulk_write(operations, ordered=False)
+                logger.info("行情已写回缓存: %s source=%s rows=%s", code, source, len(operations))
+        except Exception as exc:
+            logger.warning("行情写回缓存失败，本次读取结果仍然返回: %s", exc)
+
+
+def _normalize_symbol(symbol: str) -> str:
+    digits = "".join(ch for ch in str(symbol or "") if ch.isdigit())
+    if len(digits) >= 6:
+        return digits[-6:]
+    return str(symbol or "").strip()
+
+
+def _history_bar_limit(start_date: Optional[str], end_date: Optional[str], period: str) -> int:
+    defaults = {"daily": 250, "weekly": 120, "monthly": 60}
+    default_limit = defaults.get(period, 250)
+    if not start_date or not end_date:
+        return default_limit
+    try:
+        days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
+    except Exception:
+        return default_limit
+    days = max(int(days), 1)
+    if period == "weekly":
+        return min(max(days // 5 + 8, 20), 2000)
+    if period == "monthly":
+        return min(max(days // 28 + 3, 12), 600)
+    return min(max(int(days * 0.75) + 10, 30), 4000)
+
+
+def _kline_period(period: str) -> str:
+    return {
+        "daily": "day",
+        "day": "day",
+        "weekly": "week",
+        "week": "week",
+        "monthly": "month",
+        "month": "month",
+    }.get(period or "daily", "day")
+
+
+def _bars_to_frame(items: List[Dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(items)
+    return frame.rename(columns={"time": "date", "volume": "vol"})
+
+
+def _normalize_bar_units(frame: pd.DataFrame, source: str) -> pd.DataFrame:
+    """把适配器原始单位换成同步入库使用的股和元。"""
+    if frame is None or frame.empty or source != "tushare":
+        return frame
+    prepared = frame.copy()
+    if "vol" in prepared.columns:
+        prepared["vol"] = prepared["vol"] * 100
+    if "volume" in prepared.columns:
+        prepared["volume"] = prepared["volume"] * 100
+    if "amount" in prepared.columns:
+        prepared["amount"] = prepared["amount"] * 1000
+    return prepared
+
+
+def _filter_frame_by_dates(frame: pd.DataFrame, start_date: Optional[str], end_date: Optional[str]) -> pd.DataFrame:
+    if frame is None or frame.empty or (not start_date and not end_date):
+        return frame
+    date_column = next((name for name in ("date", "trade_date", "time") if name in frame.columns), None)
+    if date_column is None:
+        return frame
+    dates = pd.to_datetime(frame[date_column], errors="coerce")
+    mask = dates.notna()
+    if start_date:
+        mask &= dates >= pd.to_datetime(start_date)
+    if end_date:
+        mask &= dates <= pd.to_datetime(end_date)
+    filtered = frame.loc[mask]
+    return filtered if not filtered.empty else frame
+
+
+def _read_mongo_history(symbol: str, start_date: Optional[str], end_date: Optional[str], period: str):
+    from tradingagents.dataflows.cache.mongodb_cache_adapter import get_mongodb_cache_adapter
+    return get_mongodb_cache_adapter().get_historical_data(
+        _normalize_symbol(symbol), start_date, end_date, period=period
+    )
+
+
+_app_data_source_manager = None
+
+
+def get_app_data_source_manager() -> DataSourceManager:
+    """同步任务和分析读取共用的数据源管理器。"""
+    global _app_data_source_manager
+    if _app_data_source_manager is None:
+        _app_data_source_manager = DataSourceManager()
+    return _app_data_source_manager
