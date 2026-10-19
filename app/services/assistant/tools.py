@@ -300,3 +300,6 @@ def _rewrite_number_selection_reply(user_message: str, history_messages: Optiona
         )
 
     return original_text
+
+
+from app.services.assistant.memory import REMEMBER_THIS_TOOL_NAME

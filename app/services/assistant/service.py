@@ -1062,6 +1062,8 @@ class IntelligentAssistantService:
 
 
 from app.services.assistant.memory import (
+    REMEMBER_THIS_TOOL_NAME,
+    _STOCK_DATA_KEYWORDS,
     _build_memory_injection,
     _check_stock_data_sync,
     _extract_history_tool_contents,

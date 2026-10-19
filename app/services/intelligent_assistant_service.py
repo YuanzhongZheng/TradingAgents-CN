@@ -89,6 +89,8 @@ from app.services.assistant.common import (
     _NUMBERED_OPTION_LINE_RE,
 )
 from app.services.assistant.memory import (
+    REMEMBER_THIS_TOOL_NAME,
+    _STOCK_DATA_KEYWORDS,
     _build_fallback_memory_facts,
     _build_memory_injection,
     _check_stock_data_sync,

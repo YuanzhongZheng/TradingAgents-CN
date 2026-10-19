@@ -1,6 +1,6 @@
 import ResearchDefaults from '@/components/Research/ResearchDefaults.vue'
 import { searchStocks } from '@/api/multiMarket'
-import { ref, reactive, onMounted, onUnmounted, computed } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -2068,7 +2068,6 @@ const applyRecommendedModels = () => {
 }
 
 // 监听分析深度变化
-import { watch } from 'vue'
 watch(() => analysisForm.researchDepth, () => {
   checkModelSuitability()
 })

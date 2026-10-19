@@ -117,6 +117,16 @@ async def chat_with_assistant(
     assistant_role: 助手角色 general=通用分析助理 / usage_helper=使用问答机器人
     user_context: 前端上下文（仅 usage_helper 模式使用）
     """
+    from app.services.assistant.common import public_assistant_binding
+
+    _load_assistant_settings = public_assistant_binding("_load_assistant_settings")
+    load_user_profile = public_assistant_binding("load_user_profile")
+    get_assistant_conversation = public_assistant_binding("get_assistant_conversation")
+    _recall_memory_block = public_assistant_binding("_recall_memory_block")
+    IntelligentAssistantService = public_assistant_binding("IntelligentAssistantService")
+    save_assistant_message = public_assistant_binding("save_assistant_message")
+    get_or_create_assistant_thread = public_assistant_binding("get_or_create_assistant_thread")
+
     # 设置用户上下文，供 assistant_ops 工具获取当前用户
     if user_id:
         set_current_user_id(user_id)
@@ -246,6 +256,16 @@ async def stream_chat_with_assistant(
     assistant_role: 助手角色 general=通用分析助理 / usage_helper=使用问答机器人
     user_context: 前端上下文（仅 usage_helper 模式使用）
     """
+    from app.services.assistant.common import public_assistant_binding
+
+    _load_assistant_settings = public_assistant_binding("_load_assistant_settings")
+    load_user_profile = public_assistant_binding("load_user_profile")
+    get_assistant_conversation = public_assistant_binding("get_assistant_conversation")
+    _recall_memory_block = public_assistant_binding("_recall_memory_block")
+    IntelligentAssistantService = public_assistant_binding("IntelligentAssistantService")
+    save_assistant_message = public_assistant_binding("save_assistant_message")
+    get_or_create_assistant_thread = public_assistant_binding("get_or_create_assistant_thread")
+
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 

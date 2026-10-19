@@ -91,3 +91,14 @@ _MEMORY_FACT_KEYWORDS = [
 
 _NUMBER_ONLY_REPLY_RE = re.compile(r"^\s*([1-9]\d?)\s*[\.、\)）]?\s*$")
 _NUMBERED_OPTION_LINE_RE = re.compile(r"^\s*(\d{1,2})\s*[\.、\)）]\s*(.+?)\s*$")
+
+
+def public_assistant_binding(name: str):
+    """从智能助手公开模块取依赖。
+
+    实现已经拆到子模块，调用方和测试仍然替换
+    app.services.intelligent_assistant_service 上的名字。
+    """
+    from app.services import intelligent_assistant_service as public
+
+    return getattr(public, name)

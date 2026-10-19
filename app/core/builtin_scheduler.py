@@ -1,7 +1,11 @@
 """内置数据同步定时任务。"""
+import asyncio
 import logging
+from datetime import datetime
+
 from app.core.config import settings
 from app.services.multi_source_basics_sync_service import MultiSourceBasicsSyncService
+from app.services.quotes_ingestion_service import QuotesIngestionService
 from app.services.scheduler_service import set_scheduler_instance
 from app.worker.tushare_sync_service import (
     run_tushare_realtime_quotes_hourly,

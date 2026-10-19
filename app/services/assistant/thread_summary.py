@@ -186,6 +186,11 @@ async def _build_thread_summary_with_llm(
     messages: List[Dict[str, Any]],
     title: str = "",
 ) -> Dict[str, Any]:
+    from app.services.assistant.common import public_assistant_binding
+
+    get_coding_llm_config = public_assistant_binding("get_coding_llm_config")
+    UnifiedLLMClient = public_assistant_binding("UnifiedLLMClient")
+
     fallback = _build_thread_summary_from_messages(messages, title)
     transcript = _format_messages_for_summary(messages)
     if not transcript:
@@ -655,6 +660,9 @@ async def save_assistant_message(
     绝不阻塞回复返回——历史教训：coding 端点偶发慢响应时，45s 超时 × 3 次
     指数退避重试让用户为一个纯展示维护任务干等约 2.5 分钟。
     """
+    from app.services.assistant.common import public_assistant_binding
+
+    append_assistant_message = public_assistant_binding("append_assistant_message")
     thread_id = await append_assistant_message(
         db,
         user_id=user_id,
@@ -679,6 +687,10 @@ def _schedule_thread_summary(db, user_id: str, thread_id: str) -> None:
     必须自行兜底全部异常：create_task 的异常若无人消费会抛
     "Task exception was never retrieved"。
     """
+    from app.services.assistant.common import public_assistant_binding
+
+    summarize_assistant_thread = public_assistant_binding("summarize_assistant_thread")
+
     async def _run() -> None:
         try:
             await summarize_assistant_thread(
