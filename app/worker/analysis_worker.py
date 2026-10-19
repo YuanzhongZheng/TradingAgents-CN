@@ -19,10 +19,9 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from app.services.queue_service import get_queue_service
-from app.services.analysis_service import get_analysis_service
 from app.core.database import init_database, close_database
 from app.core.config import settings
-from app.models.analysis import AnalysisTask, AnalysisParameters, AnalysisStatus
+from app.models.analysis import AnalysisParameters, AnalysisStatus
 from app.services.config_provider import provider as config_provider
 from app.services.queue import DEFAULT_USER_CONCURRENT_LIMIT, GLOBAL_CONCURRENT_LIMIT, VISIBILITY_TIMEOUT_SECONDS
 from app.core.jdyun import is_jdyun_mode, get_jdyun_worker_max_concurrent, get_jdyun_stock_interval_seconds
@@ -699,7 +698,7 @@ class AnalysisWorker:
                     import json
                     parameters_dict = json.loads(parameters_dict)
                 
-                engine_type = parameters_dict.get("engine", "legacy")
+                engine_type = parameters_dict.get("engine", "v2")
                 if engine_type == "v2":
                     from app.services.task_analysis_service import get_task_analysis_service
                     from app.models.analysis import AnalysisStatus
@@ -868,27 +867,14 @@ class AnalysisWorker:
                 logger.info(f"✅ [unified引擎] 任务完成: {task_id}")
                 
             else:
-                # legacy 引擎：使用旧的分析服务
-                logger.info(f"🔧 [Worker] 使用 legacy 引擎执行任务: {task_id}")
-                parameters = AnalysisParameters(**parameters_dict)
-
-                task = AnalysisTask(
-                    task_id=task_id,
-                    user_id=user_id,
-                    symbol=stock_code,  # 使用 symbol 字段（必填）
-                    stock_code=stock_code,  # 保留 stock_code 字段（兼容）
-                    batch_id=task_data.get("batch_id"),
-                    parameters=parameters
+                logger.error(
+                    f"❌ [Worker] 拒绝执行 legacy 引擎任务: task_id={task_id}, engine={engine_type}"
                 )
-
-                # 执行分析
-                result = await get_analysis_service().execute_analysis_task(
-                    task,
-                    progress_callback=self._progress_callback
+                raise RuntimeError(
+                    "[已停用] analysis worker 拒绝 engine=%s 的任务，"
+                    "请将队列参数 engine 改为 'v2'。"
+                    "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md" % engine_type
                 )
-
-                success = True
-                logger.info(f"✅ [legacy引擎] 任务完成: {task_id} - 耗时: {result.execution_time:.2f}秒")
 
         except Exception as e:
             logger.error(f"❌ 任务执行失败: {task_id} - {e}")

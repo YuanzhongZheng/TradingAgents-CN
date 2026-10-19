@@ -31,7 +31,7 @@ _OUTPUT_DIR = "data/deliverables"
 def _resolve_spec_llm():
     """构建规格生成 LLM（模型解析链与 agent_executor 一致，openai 兼容接入）"""
     from app.core.database import get_mongo_db_sync
-    from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+    from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
     from core.llm.models import LLMConfig, LLMProvider
     from core.llm.unified_client import UnifiedLLMClient
 

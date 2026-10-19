@@ -1696,7 +1696,7 @@ def resolve_llm_config_from_config_doc(
     if not resolved_model_name:
         return None
 
-    from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+    from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
 
     provider_info = get_provider_and_url_by_model_sync(
         resolved_model_name,

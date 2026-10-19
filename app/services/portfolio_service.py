@@ -2472,7 +2472,7 @@ class PortfolioService:
 
             # 从系统配置获取深度分析模型（与个股分析保持一致）
             from app.services.model_capability_service import get_model_capability_service
-            from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+            from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
             from tradingagents.graph.trading_graph import create_llm_by_provider
 
             capability_service = get_model_capability_service()
@@ -4301,73 +4301,6 @@ class PortfolioService:
             "请使用 analyze_position_by_code_v2 或 _get_cached_stock_analysis_report。"
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        try:
-            from tradingagents.core.engine.stock_analysis_engine import StockAnalysisEngine
-            from core.workflow.builder import LegacyDependencyProvider
-
-            # 转换市场类型
-            market_type_map = {
-                "A股": "cn",
-                "港股": "hk",
-                "美股": "us",
-                "ETF": "cn"
-            }
-            market_type = market_type_map.get(market, "cn")
-
-            logger.info(f"🚀 [持仓分析] 使用 StockAnalysisEngine 分析: {stock_code} (市场: {market_type})")
-
-            # 创建 LLM 依赖提供者（从数据库配置获取 LLM）
-            dependency_provider = LegacyDependencyProvider.get_instance()
-            llm = dependency_provider.get_llm("quick")
-
-            engine = StockAnalysisEngine(
-                llm=llm,
-                use_stub=False
-            )
-            result = engine.analyze(
-                ticker=stock_code,
-                trade_date=datetime.now().strftime("%Y-%m-%d"),
-                market_type=market_type
-            )
-
-            if result and result.success:
-                logger.info(f"✅ [持仓分析] StockAnalysisEngine 分析完成: {stock_code}")
-
-                # 转换为统一的返回格式
-                context = result.context
-                reports = {}
-
-                # 从 context 提取各分析师报告
-                if hasattr(context, 'reports') and context.reports:
-                    reports = context.reports
-                elif hasattr(context, 'get'):
-                    reports = {
-                        "market_report": context.get("market_report", ""),
-                        "fundamentals_report": context.get("fundamentals_report", ""),
-                        "news_report": context.get("news_report", ""),
-                        "sentiment_report": context.get("sentiment_report", ""),
-                        "sector_report": context.get("sector_report", "")
-                    }
-
-                return {
-                    "task_id": "engine",
-                    "source": "stock_analysis_engine",
-                    "reports": reports,
-                    "decision": result.final_decision if hasattr(result, 'final_decision') else {},
-                    "summary": result.summary if hasattr(result, 'summary') else "",
-                    "recommendation": result.recommendation if hasattr(result, 'recommendation') else ""
-                }
-            else:
-                logger.warning(f"⚠️ [持仓分析] StockAnalysisEngine 返回失败结果: {stock_code}")
-                return None
-
-        except ImportError as e:
-            logger.warning(f"⚠️ [持仓分析] StockAnalysisEngine 模块不可用: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"❌ [持仓分析] StockAnalysisEngine 调用异常: {e}", exc_info=True)
-            return None
 
     async def _get_stock_analysis_via_legacy(
         self,
@@ -4398,159 +4331,6 @@ class PortfolioService:
             "请使用 analyze_position_by_code_v2 或 _get_cached_stock_analysis_report。"
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        from app.services.simple_analysis_service import get_simple_analysis_service
-        from app.models.analysis import SingleAnalysisRequest, AnalysisParameters
-        from app.core.database import get_mongo_db
-        import asyncio
-
-        analysis_service = get_simple_analysis_service()
-
-        db = get_mongo_db()
-
-        # 3小时内的报告可以复用（股票基本面、技术面数据变化不大）
-        cache_hours = 3
-        # 🔥 使用 now_tz() 确保时区一致
-        recent_cutoff = now_tz() - timedelta(hours=cache_hours)
-
-        # 1. 首先检查是否有已完成的分析报告（3小时内，不限用户）
-        # 单股分析的结果对所有用户都是一样的，可以共享
-        # 注意：analysis_reports 集合中使用的是 stock_symbol 字段（不是 stock_code）
-        existing_report = await db.analysis_reports.find_one({
-            "stock_symbol": stock_code,  # 使用 stock_symbol 字段匹配
-            "created_at": {"$gte": recent_cutoff},
-            "status": "completed"
-        }, sort=[("created_at", -1)])
-
-        if existing_report:
-            created_at = existing_report.get("created_at", datetime.now())
-            if isinstance(created_at, str):
-                from dateutil.parser import parse
-                created_at = parse(created_at)
-            
-            # 🔥 确保时区一致：MongoDB 存储的是 UTC 时间
-            # 如果从 MongoDB 读取的是 naive datetime，应该假定为 UTC
-            # 注意：tz 和 now_tz 已在文件顶部导入
-            current_time = now_tz()
-            
-            if created_at:
-                # 如果 created_at 是 naive datetime，假定为 UTC（因为 MongoDB 存储的是 UTC）
-                if isinstance(created_at, datetime) and created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=tz.utc)
-                # 转换为配置时区以便计算时间差
-                if created_at.tzinfo:
-                    created_at = created_at.astimezone(current_time.tzinfo)
-            else:
-                created_at = current_time
-            
-            report_age = current_time - created_at
-            age_minutes = int(report_age.total_seconds() / 60)
-            logger.info(f"📚 [持仓分析] 复用已完成的分析报告: {stock_code}, "
-                       f"task_id={existing_report.get('task_id')}, "
-                       f"报告时间: {age_minutes}分钟前 (created_at: {created_at}, current_time: {current_time})")
-            return {
-                "task_id": existing_report.get("task_id"),
-                "reports": existing_report.get("reports", {}),
-                "decision": existing_report.get("decision", {}),
-                "summary": existing_report.get("summary", ""),
-                "recommendation": existing_report.get("recommendation", ""),
-                "source": "cached",
-                "cache_age_minutes": age_minutes
-            }
-
-        # 如果设置了 skip_if_not_exists，且没有缓存报告，直接返回 None
-        if skip_if_not_exists:
-            logger.info(f"⏭️ [持仓分析] 没有缓存的单股分析报告，跳过单股分析: {stock_code}")
-            return None
-
-        # 2. 检查是否有正在运行的分析任务（避免重复创建，不限用户）
-        # 注意：analysis_reports 集合中使用的是 stock_symbol 字段
-        running_report = await db.analysis_reports.find_one({
-            "stock_symbol": stock_code,  # 使用 stock_symbol 字段匹配
-            "created_at": {"$gte": recent_cutoff},
-            "status": {"$in": ["pending", "running"]}
-        }, sort=[("created_at", -1)])
-
-        if running_report:
-            task_id = running_report.get("task_id")
-            logger.info(f"⏳ [持仓分析] 发现正在运行的任务，等待完成: {stock_code}, task_id={task_id}")
-            # 等待这个正在运行的任务完成
-            return await self._wait_for_analysis_task(analysis_service, task_id, stock_code)
-
-        # 3. 没有缓存也没有正在运行的任务，创建新的分析
-        logger.info(f"🔄 [持仓分析] 3小时内无可用报告，执行新的单股分析: {stock_code}, market={market}")
-
-        # 创建分析请求（使用快速分析模式）
-        analysis_request = SingleAnalysisRequest(
-            symbol=stock_code,
-            stock_code=stock_code,
-            parameters=AnalysisParameters(
-                research_depth="快速",  # 使用快速模式，减少等待时间
-                selected_analysts=["market", "fundamentals", "news"],
-                market_type=market
-            )
-        )
-
-        # 创建任务
-        task_result = await analysis_service.create_analysis_task(user_id, analysis_request)
-        task_id = task_result.get("task_id")
-
-        # 同步执行分析（等待完成）
-        await analysis_service.execute_analysis_background(task_id, user_id, analysis_request)
-
-        # 等待任务完成
-        return await self._wait_for_analysis_task(analysis_service, task_id, stock_code)
-
-    async def _wait_for_analysis_task(
-        self,
-        analysis_service,
-        task_id: str,
-        stock_code: str,
-        max_wait: int = 300
-    ) -> Dict[str, Any]:
-        """等待分析任务完成并返回结果"""
-        import asyncio
-
-        waited = 0
-        while waited < max_wait:
-            task_status = await analysis_service.get_task_status(task_id)
-            if task_status and task_status.get("status") == "completed":
-                result_data = task_status.get("result_data", {})
-                logger.info(f"✅ [持仓分析] 单股分析完成: {stock_code}")
-                return {
-                    "task_id": task_id,
-                    "reports": result_data.get("reports", {}),
-                    "decision": result_data.get("decision", {}),
-                    "summary": result_data.get("summary", ""),
-                    "recommendation": result_data.get("recommendation", ""),
-                    "source": "fresh"
-                }
-            elif task_status and task_status.get("status") == "failed":
-                error_msg = task_status.get("error_message", "未知错误")
-                logger.warning(f"⚠️ [持仓分析] 单股分析失败: {stock_code}, 错误: {error_msg}")
-                # 返回空报告，持仓分析仍可基于持仓信息给出建议
-                return {
-                    "task_id": task_id,
-                    "reports": {},
-                    "decision": {},
-                    "summary": f"单股分析未能完成: {error_msg}",
-                    "recommendation": "",
-                    "source": "failed"
-                }
-
-            await asyncio.sleep(2)
-            waited += 2
-
-        # 超时
-        logger.warning(f"⚠️ [持仓分析] 单股分析超时: {stock_code}")
-        return {
-            "task_id": task_id,
-            "reports": {},
-            "decision": {},
-            "summary": "单股分析超时",
-            "recommendation": "",
-            "source": "timeout"
-        }
 
     async def _call_position_ai_analysis_v2(
         self,
@@ -4575,7 +4355,7 @@ class PortfolioService:
                 user_id=user_id
             )
 
-            from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+            from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
             from app.services.model_capability_service import get_model_capability_service
             from tradingagents.graph.trading_graph import create_llm_by_provider
 
@@ -4663,7 +4443,7 @@ class PortfolioService:
         try:
             prompt = self._build_position_analysis_prompt(snapshot, params)
 
-            from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+            from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
             from tradingagents.graph.trading_graph import create_llm_by_provider
 
             model_name = "qwen-turbo"

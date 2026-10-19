@@ -668,7 +668,7 @@ class UnifiedAnalysisEngine:
 
         # 🧠 A1b: 深度档位 → 思考预算（传给 builder，与 DB 显式配置合并，仅火山方舟推理模型注入）
         try:
-            from app.services.simple_analysis_service import RESEARCH_DEPTH_REASONING_EFFORT
+            from app.services.llm_model_resolution import RESEARCH_DEPTH_REASONING_EFFORT
             _depth_key = str(workflow_inputs.get("research_depth") or "标准").strip()
             legacy_config["depth_reasoning_effort"] = RESEARCH_DEPTH_REASONING_EFFORT.get(_depth_key, "medium")
             self.logger.info(
@@ -798,43 +798,6 @@ class UnifiedAnalysisEngine:
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
             % getattr(task, "task_id", "<unknown>")
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        self.logger.info(f"🔄 使用旧引擎执行: TradingAgentsGraph")
-
-        # 只支持股票分析任务
-        if task.task_type != AnalysisTaskType.STOCK_ANALYSIS:
-            raise ValueError(f"旧引擎只支持股票分析任务，当前任务类型: {task.task_type}")
-
-        # 导入旧引擎
-        from tradingagents.graph.trading_graph import TradingAgentsGraph
-
-        # 准备参数
-        symbol = task.task_params.get("symbol")
-        analysis_date = task.task_params.get("analysis_date")
-
-        if not symbol:
-            raise ValueError("缺少必需参数: symbol")
-
-        # 创建引擎实例
-        graph = TradingAgentsGraph(debug=False)
-
-        # 执行分析
-        self.logger.info(f"📊 分析股票: {symbol} (日期: {analysis_date or '最新'})")
-
-        # 调用 propagate 方法
-        state, decision = graph.propagate(symbol, analysis_date)
-
-        # 转换结果格式
-        result = {
-            "engine": "legacy",
-            "symbol": symbol,
-            "analysis_date": analysis_date,
-            "decision": decision,
-            "state": state,
-            "source": "TradingAgentsGraph"
-        }
-
-        return result
 
     async def _execute_via_llm(
         self,

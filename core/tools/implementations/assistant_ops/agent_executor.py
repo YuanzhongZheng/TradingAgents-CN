@@ -184,7 +184,7 @@ def _ensure_surface_access(agent_entry: Dict[str, Any], surface: str) -> None:
 
 
 def _resolve_assistant_agent_llm(agent_id: str):
-    from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+    from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
     from core.config.agent_config_manager import AgentConfigManager
     from tradingagents.graph.trading_graph import create_llm_by_provider
 

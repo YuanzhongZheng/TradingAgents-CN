@@ -302,7 +302,7 @@ class LegacyDependencyProvider:
         """
         创建 LLM 实例
 
-        逻辑与旧引擎 (simple_analysis_service.create_analysis_config) 保持一致：
+        逻辑与分析配置 (create_analysis_config) 保持一致：
         1. 如果用户传入了模型名称 (quick_think_llm, deep_think_llm)，根据模型名称从数据库查找配置
         2. 如果用户没有传入模型名称，从数据库获取默认配置
         3. 根据模型名称获取对应的 provider、backend_url、api_key
@@ -343,9 +343,8 @@ class LegacyDependencyProvider:
                 logger.info(f"[依赖提供者] 使用数据库默认配置补充: quick_model={quick_model}, deep_model={deep_model}")
 
         # 根据模型名称从数据库获取完整配置（provider, url, api_key）
-        # 复用 simple_analysis_service 中已有的统一查询函数
         # 🔥 每次调用时都重新从数据库读取配置，确保 API key 更新后立即生效
-        from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+        from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
         quick_config = get_provider_and_url_by_model_sync(quick_model)
         deep_config = get_provider_and_url_by_model_sync(deep_model)
 
@@ -383,7 +382,7 @@ class LegacyDependencyProvider:
             # 🔧 从数据库读取模型配置（max_tokens, temperature, timeout, reasoning_effort）
             # 优先级：用户显式指定(self._config) > 数据库配置 > 默认值
             # 修复：之前 builder 不读 DB 的 max_tokens，导致 UI 配置的 Token 数不生效
-            from app.services.simple_analysis_service import _load_model_config_from_db
+            from app.services.llm_model_resolution import _load_model_config_from_db
             quick_db_cfg = _load_model_config_from_db(quick_model)
             deep_db_cfg = _load_model_config_from_db(deep_model)
 
@@ -468,7 +467,7 @@ class LegacyDependencyProvider:
             model = db_default.get(f"{llm_type}_think_llm", "qwen-turbo" if llm_type == "quick" else "qwen-plus")
 
         # 根据模型名称获取配置（provider, url, api_key）
-        from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+        from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
         config = get_provider_and_url_by_model_sync(model)
 
         provider = config.get("provider", "dashscope")
@@ -481,7 +480,7 @@ class LegacyDependencyProvider:
 
         # 🔧 从数据库读取模型配置（max_tokens, temperature, timeout, reasoning_effort）
         # 优先级：显式参数 > self._config > 数据库配置 > 默认值
-        from app.services.simple_analysis_service import _load_model_config_from_db
+        from app.services.llm_model_resolution import _load_model_config_from_db
         db_cfg = _load_model_config_from_db(model)
 
         resolved_temperature = (
@@ -2293,81 +2292,6 @@ class WorkflowBuilder:
             agent_id,
         )
         return None
-        # pragma: no cover - 以下旧版 factory_map 代码保留但不执行，为 v4.0 删除做准备
-        # 智能体到工厂函数的映射
-        factory_map = {
-            # 分析师
-            "market_analyst": ("tradingagents.agents.analysts.market_analyst", "create_market_analyst", "toolkit"),
-            "news_analyst": ("tradingagents.agents.analysts.news_analyst", "create_news_analyst", "toolkit"),
-            "fundamentals_analyst": ("tradingagents.agents.analysts.fundamentals_analyst", "create_fundamentals_analyst", "toolkit"),
-            "social_analyst": ("tradingagents.agents.analysts.social_media_analyst", "create_social_media_analyst", "toolkit"),
-            # 🆕 大盘分析师和板块分析师（需要 toolkit，但内部不使用工具调用机制）
-            "index_analyst": ("tradingagents.agents.analysts.index_analyst", "create_index_analyst", "toolkit"),
-            "sector_analyst": ("tradingagents.agents.analysts.sector_analyst", "create_sector_analyst", "toolkit"),
-            # 研究员
-            "bull_researcher": ("tradingagents.agents.researchers.bull_researcher", "create_bull_researcher", "bull_memory"),
-            "bear_researcher": ("tradingagents.agents.researchers.bear_researcher", "create_bear_researcher", "bear_memory"),
-            # 研究整合员
-            "trader": ("tradingagents.agents.trader.trader", "create_trader", "trader_memory"),
-            # 管理者
-            "research_manager": ("tradingagents.agents.managers.research_manager", "create_research_manager", "invest_judge_memory"),
-            "risk_manager": ("tradingagents.agents.managers.risk_manager", "create_risk_manager", "risk_manager_memory"),
-            # 风险辩论者
-            "risky_analyst": ("tradingagents.agents.risk_mgmt.aggresive_debator", "create_risky_debator", None),
-            "safe_analyst": ("tradingagents.agents.risk_mgmt.conservative_debator", "create_safe_debator", None),
-            "neutral_analyst": ("tradingagents.agents.risk_mgmt.neutral_debator", "create_neutral_debator", None),
-        }
-
-        if agent_id not in factory_map:
-            return None
-
-        module_path, func_name, dep_type = factory_map[agent_id]
-
-        try:
-            import importlib
-            module = importlib.import_module(module_path)
-            factory_func = getattr(module, func_name)
-
-            # 🔥 关键修复：根据 agent_id 判断应该使用 quick 还是 deep LLM
-            # 使用深度模型的 Agent：
-            # 1. 管理者（research_manager, risk_manager）- 需要综合大量信息做决策
-            # 2. 风险分析师（risky/safe/neutral_analyst）- 需要处理大量分析报告
-            llm_type = "quick"  # 默认使用快速模型
-            if agent_id in [
-                "research_manager", "risk_manager",  # 管理者
-                "risky_analyst", "safe_analyst", "neutral_analyst"  # 旧版风险分析师
-            ]:
-                llm_type = "deep"  # 使用深度模型
-                logger.info(f"[遗留适配器] 🔧 {agent_id} 使用深度分析模型 (deep_think_llm)")
-            else:
-                logger.info(f"[遗留适配器] 🔧 {agent_id} 使用快速分析模型 (quick_think_llm)")
-            
-            # 🔥 获取 Agent 配置的 temperature（如果存在）
-            # 注意：遗留适配器创建的 Agent 可能没有从数据库加载配置
-            # 这里暂时使用默认 LLM，后续可以考虑改进
-            llm = self._legacy_provider.get_llm(llm_type)
-
-            # 根据依赖类型获取第二个参数
-            if dep_type == "toolkit":
-                second_arg = self._legacy_provider.get_toolkit()
-            elif dep_type:
-                second_arg = self._legacy_provider.get_memory(dep_type)
-            else:
-                second_arg = None
-
-            # 创建节点函数
-            if second_arg is not None:
-                node_func = factory_func(llm, second_arg)
-            else:
-                # 风险辩论者只需要 LLM
-                node_func = factory_func(llm)
-
-            logger.info(f"[遗留适配器] 成功创建: {agent_id}")
-            return node_func
-
-        except Exception as e:
-            logger.warning(f"[遗留适配器] 创建失败 {agent_id}: {e}")
-            return None
 
     def _create_condition_node(self, node: NodeDefinition) -> Callable:
         """创建条件节点"""

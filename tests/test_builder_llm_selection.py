@@ -33,7 +33,7 @@ def test_custom_llm_respects_agent_timeout_and_max_tokens(monkeypatch) -> None:
         return kwargs
 
     monkeypatch.setattr(
-        "app.services.simple_analysis_service.get_provider_and_url_by_model_sync",
+        "app.services.llm_model_resolution.get_provider_and_url_by_model_sync",
         fake_get_provider_and_url_by_model_sync,
     )
     monkeypatch.setattr(

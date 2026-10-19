@@ -443,7 +443,7 @@ async def import_positions_from_screenshot(
         import base64
         import os
         from app.services.model_capability_service import get_model_capability_service
-        from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+        from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
         from tradingagents.graph.trading_graph import create_llm_by_provider
 
         # 京东云模式下禁用（GLM-5/5.1 不支持 Vision）

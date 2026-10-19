@@ -326,28 +326,6 @@ class ThreadWorker:
                     "请将队列参数 engine 改为 'v2'。"
                     "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md" % engine_type
                 )
-                # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-                # 使用 legacy 引擎
-                from app.services.simple_analysis_service import SimpleAnalysisService
-                from app.models.analysis import SingleAnalysisRequest, AnalysisParameters
-
-                # 🔥 从参数字典构造 AnalysisParameters 对象
-                params = AnalysisParameters(**parameters_dict) if parameters_dict else AnalysisParameters()
-
-                # 🔥 构造 SingleAnalysisRequest 对象
-                request = SingleAnalysisRequest(
-                    symbol=stock_code,
-                    stock_code=stock_code,
-                    parameters=params
-                )
-
-                simple_service = SimpleAnalysisService()
-                await simple_service.execute_analysis_background(
-                    task_id=task_id,
-                    user_id=user_id,
-                    request=request
-                )
-                logger.info(f"✅ [legacy引擎] 任务完成: {task_id}")
 
             success = True
 

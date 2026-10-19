@@ -159,7 +159,6 @@ def test_cancelled_queued_call_never_starts_cli(monkeypatch):
 
 @pytest.mark.parametrize("selection", ["gpt-6-astra", "codex::gpt-6-astra"])
 def test_analysis_selection_preserves_codex_parameters(monkeypatch, selection):
-    from app.services import simple_analysis_service as service
     from core.workflow.builder import LegacyDependencyProvider
 
     model_config = {"provider": "codex", "model_name": "gpt-6-astra",
@@ -169,8 +168,10 @@ def test_analysis_selection_preserves_codex_parameters(monkeypatch, selection):
     client = Mock()
     client.__getitem__ = Mock(return_value=db)
     monkeypatch.setattr("pymongo.MongoClient", lambda *a, **k: client)
-    monkeypatch.setattr(service, "get_provider_and_url_by_model_sync",
-                        lambda *a, **k: {"provider": "codex", "backend_url": "", "api_key": None})
+    monkeypatch.setattr(
+        "app.services.llm_model_resolution.get_provider_and_url_by_model_sync",
+        lambda *a, **k: {"provider": "codex", "backend_url": "", "api_key": None},
+    )
     monkeypatch.setattr("app.core.jdyun.is_jdyun_mode", lambda: False)
     provider = LegacyDependencyProvider({"quick_think_llm": selection, "deep_think_llm": selection})
     for role in ["quick", "deep"]:
@@ -192,7 +193,7 @@ def test_disabled_local_provider_does_not_register(monkeypatch):
 
 @pytest.mark.parametrize("selection", ["gpt-6-astra", "codex::gpt-6-astra"])
 def test_database_failure_never_routes_astra_to_paid_api(monkeypatch, selection):
-    from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+    from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
     monkeypatch.setattr("pymongo.MongoClient", Mock(side_effect=RuntimeError("offline")))
     result = get_provider_and_url_by_model_sync(selection)
     assert result == {"provider": "codex", "backend_url": "", "api_key": None}

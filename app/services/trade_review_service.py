@@ -1281,7 +1281,7 @@ class TradeReviewService:
             )
 
             # 使用统一的 LLM 适配器
-            from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+            from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
             from tradingagents.graph.trading_graph import create_llm_by_provider
 
             model_name = "qwen-plus"
@@ -2676,7 +2676,7 @@ class TradeReviewService:
         trades_summary: List[TradeSummaryItem]
     ) -> AIPeriodicReview:
         """调用AI进行阶段性复盘分析"""
-        from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+        from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
         import asyncio
 
         # 构建提示词
@@ -3362,7 +3362,7 @@ class TradeReviewService:
         except Exception as e:
             logger.error(f"❌ [工作流复盘] 从数据库获取模型配置失败: {e}", exc_info=True)
             # 失败时使用默认配置
-            from app.services.simple_analysis_service import get_provider_and_url_by_model_sync
+            from app.services.llm_model_resolution import get_provider_and_url_by_model_sync
             model_name = "qwen-plus"
             provider_info = get_provider_and_url_by_model_sync(model_name)
             legacy_config = {

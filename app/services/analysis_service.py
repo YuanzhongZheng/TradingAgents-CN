@@ -1,11 +1,11 @@
 """
-股票分析服务
-将现有的TradingAgents分析功能包装成API服务
+股票分析服务。
+
+负责把分析任务写入队列。旧版 TradingAgentsGraph 执行代码已删除。
 """
 
 import asyncio
 import uuid
-import json
 import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Callable
@@ -20,9 +20,6 @@ sys.path.insert(0, str(project_root))
 from tradingagents.utils.logging_init import init_logging
 init_logging()
 
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
-from app.services.simple_analysis_service import create_analysis_config, get_provider_by_model_name
 from app.models.analysis import (
     AnalysisParameters, AnalysisResult, AnalysisTask, AnalysisBatch,
     AnalysisStatus, BatchStatus, SingleAnalysisRequest, BatchAnalysisRequest
@@ -106,7 +103,7 @@ class AnalysisService:
             logger.warning(f"⚠️ 获取用户风险偏好失败: {e}，使用默认值: neutral")
             return "neutral"
     
-    def _get_trading_graph(self, config: Dict[str, Any]) -> TradingAgentsGraph:
+    def _get_trading_graph(self, config: Dict[str, Any]):
         """获取或创建TradingAgents图实例（带缓存）— 已停用
 
         v3.0 起旧版 TradingAgentsGraph 引擎已停用。
@@ -120,21 +117,6 @@ class AnalysisService:
             "TradingAgentsGraph 不再实例化。"
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        config_key = json.dumps(config, sort_keys=True)
-
-        if config_key not in self._trading_graph_cache:
-            # 直接使用完整配置，不再合并DEFAULT_CONFIG（因为create_analysis_config已经处理了）
-            # 这与单股分析服务和web目录的方式一致
-            self._trading_graph_cache[config_key] = TradingAgentsGraph(
-                selected_analysts=config.get("selected_analysts", ["market", "fundamentals"]),
-                debug=config.get("debug", False),
-                config=config
-            )
-
-            logger.info(f"创建新的TradingAgents实例: {config.get('llm_provider', 'default')}")
-
-        return self._trading_graph_cache[config_key]
 
     def _execute_analysis_sync_with_progress(self, task: AnalysisTask, progress_tracker: RedisProgressTracker) -> AnalysisResult:
         """同步执行分析任务（在线程池中运行，带进度跟踪）— 已停用
@@ -151,150 +133,6 @@ class AnalysisService:
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
             % getattr(task, "task_id", "<unknown>")
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        try:
-            # 在线程中重新初始化日志系统
-            from tradingagents.utils.logging_init import init_logging, get_logger
-            init_logging()
-            thread_logger = get_logger('analysis_thread')
-
-            thread_logger.info(f"🔄 [线程池] 开始执行分析任务: {task.task_id} - {task.symbol}")
-            logger.info(f"🔄 [线程池] 开始执行分析任务: {task.task_id} - {task.symbol}")
-
-            # 环境检查
-            progress_tracker.update_progress("🔧 检查环境配置")
-
-            # 使用标准配置函数创建完整配置
-            from app.core.unified_config import unified_config
-
-            quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
-            deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
-
-            # 🔧 从 MongoDB 数据库读取模型的完整配置参数（而不是从 JSON 文件）
-            quick_model_config = None
-            deep_model_config = None
-
-            try:
-                from pymongo import MongoClient
-                from app.core.config import settings
-
-                # 使用同步 MongoDB 客户端
-                client = MongoClient(settings.MONGO_URI)
-                db = client[settings.MONGO_DB]
-                collection = db.system_configs
-
-                # 查询最新的活跃配置
-                doc = collection.find_one({"is_active": True}, sort=[("version", -1)])
-
-                if doc and "llm_configs" in doc:
-                    llm_configs = doc["llm_configs"]
-                    logger.info(f"✅ 从 MongoDB 读取到 {len(llm_configs)} 个模型配置")
-
-                    for llm_config in llm_configs:
-                        if llm_config.get("model_name") == quick_model:
-                            quick_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            if llm_config.get("reasoning_effort"):
-                                quick_model_config["reasoning_effort"] = llm_config["reasoning_effort"]
-                            logger.info(f"✅ 读取快速模型配置: {quick_model}")
-                            logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
-                            logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
-                            logger.info(f"   api_base={quick_model_config['api_base']}")
-
-                        if llm_config.get("model_name") == deep_model:
-                            deep_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            if llm_config.get("reasoning_effort"):
-                                deep_model_config["reasoning_effort"] = llm_config["reasoning_effort"]
-                            logger.info(f"✅ 读取深度模型配置: {deep_model} - {deep_model_config}")
-                else:
-                    logger.warning("⚠️ MongoDB 中没有找到系统配置，将使用默认参数")
-            except Exception as e:
-                logger.warning(f"⚠️ 从 MongoDB 读取模型配置失败: {e}，将使用默认参数")
-
-            # 成本估算
-            progress_tracker.update_progress("💰 预估分析成本")
-
-            # 根据模型名称动态查找供应商（同步版本）
-            llm_provider = "dashscope"  # 默认使用dashscope
-
-            # 参数配置
-            progress_tracker.update_progress("⚙️ 配置分析参数")
-
-            # 使用标准配置函数创建完整配置
-            from app.services.simple_analysis_service import create_analysis_config
-            config = create_analysis_config(
-                research_depth=task.parameters.research_depth,
-                selected_analysts=task.parameters.selected_analysts or ["market", "fundamentals"],
-                quick_model=quick_model,
-                deep_model=deep_model,
-                llm_provider=llm_provider,
-                market_type=getattr(task.parameters, 'market_type', "A股"),
-                quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
-            )
-
-            # 启动引擎
-            progress_tracker.update_progress("🚀 初始化AI分析引擎")
-
-            # 获取TradingAgents实例
-            trading_graph = self._get_trading_graph(config)
-
-            # 执行分析
-            from datetime import timezone
-            start_time = datetime.now(timezone.utc)
-            analysis_date = task.parameters.analysis_date or datetime.now().strftime("%Y-%m-%d")
-
-            # 创建进度回调函数
-            def progress_callback(message: str):
-                progress_tracker.update_progress(message)
-
-            # 调用现有的分析方法（同步调用，传递进度回调）
-            from tradingagents.agents.utils.agent_context import AgentContext
-            # 获取用户风险偏好并注入到 AgentContext
-            risk_preference = self._get_user_risk_preference(str(task.user_id))
-            ctx = AgentContext(user_id=str(task.user_id), preference_id=risk_preference)
-            logger.info(f"[diagnose] inject AgentContext task_id={task.task_id} user_id={task.user_id} symbol={task.symbol} date={analysis_date} risk_preference={risk_preference}")
-            _, decision = trading_graph.propagate(task.symbol, analysis_date, progress_callback, task_id=task.task_id, agent_context=ctx.__dict__)
-
-            execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-            # 生成报告
-            progress_tracker.update_progress("📊 生成研究报告")
-
-            # 从决策中提取模型信息
-            model_info = decision.get('model_info', 'Unknown') if isinstance(decision, dict) else 'Unknown'
-
-            # 构建结果
-            result = AnalysisResult(
-                analysis_id=str(uuid.uuid4()),
-                summary=decision.get("summary", ""),
-                recommendation=decision.get("recommendation", ""),
-                confidence_score=decision.get("confidence_score", 0.0),
-                risk_level=decision.get("risk_level", "中等"),
-                key_points=decision.get("key_points", []),
-                detailed_analysis=decision,
-                execution_time=execution_time,
-                tokens_used=decision.get("tokens_used", 0),
-                model_info=model_info  # 🔥 添加模型信息字段
-            )
-
-            logger.info(f"✅ [线程池] 分析任务完成: {task.task_id} - 耗时{execution_time:.2f}秒")
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ [线程池] 执行分析任务失败: {task.task_id} - {e}")
-            raise
 
     def _execute_analysis_sync(self, task: AnalysisTask) -> AnalysisResult:
         """同步执行分析任务（在线程池中运行）— 已停用
@@ -311,125 +149,6 @@ class AnalysisService:
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
             % getattr(task, "task_id", "<unknown>")
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        try:
-            logger.info(f"🔄 [线程池] 开始执行分析任务: {task.task_id} - {task.symbol}")
-
-            # 使用标准配置函数创建完整配置
-            from app.core.unified_config import unified_config
-
-            quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
-            deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
-
-            # 🔧 从 MongoDB 数据库读取模型的完整配置参数（而不是从 JSON 文件）
-            quick_model_config = None
-            deep_model_config = None
-
-            try:
-                from pymongo import MongoClient
-                from app.core.config import settings
-
-                # 使用同步 MongoDB 客户端
-                client = MongoClient(settings.MONGO_URI)
-                db = client[settings.MONGO_DB]
-                collection = db.system_configs
-
-                # 查询最新的活跃配置
-                doc = collection.find_one({"is_active": True}, sort=[("version", -1)])
-
-                if doc and "llm_configs" in doc:
-                    llm_configs = doc["llm_configs"]
-                    logger.info(f"✅ 从 MongoDB 读取到 {len(llm_configs)} 个模型配置")
-
-                    for llm_config in llm_configs:
-                        if llm_config.get("model_name") == quick_model:
-                            quick_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            if llm_config.get("reasoning_effort"):
-                                quick_model_config["reasoning_effort"] = llm_config["reasoning_effort"]
-                            logger.info(f"✅ 读取快速模型配置: {quick_model}")
-                            logger.info(f"   max_tokens={quick_model_config['max_tokens']}, temperature={quick_model_config['temperature']}")
-                            logger.info(f"   timeout={quick_model_config['timeout']}, retry_times={quick_model_config['retry_times']}")
-                            logger.info(f"   api_base={quick_model_config['api_base']}")
-
-                        if llm_config.get("model_name") == deep_model:
-                            deep_model_config = {
-                                "max_tokens": llm_config.get("max_tokens", 4000),
-                                "temperature": llm_config.get("temperature", 0.7),
-                                "timeout": llm_config.get("timeout", 180),
-                                "retry_times": llm_config.get("retry_times", 3),
-                                "api_base": llm_config.get("api_base")
-                            }
-                            if llm_config.get("reasoning_effort"):
-                                deep_model_config["reasoning_effort"] = llm_config["reasoning_effort"]
-                            logger.info(f"✅ 读取深度模型配置: {deep_model} - {deep_model_config}")
-                else:
-                    logger.warning("⚠️ MongoDB 中没有找到系统配置，将使用默认参数")
-            except Exception as e:
-                logger.warning(f"⚠️ 从 MongoDB 读取模型配置失败: {e}，将使用默认参数")
-
-            # 根据模型名称动态查找供应商（同步版本）
-            llm_provider = "dashscope"  # 默认使用dashscope
-
-            # 使用标准配置函数创建完整配置
-            from app.services.simple_analysis_service import create_analysis_config
-            config = create_analysis_config(
-                research_depth=task.parameters.research_depth,
-                selected_analysts=task.parameters.selected_analysts or ["market", "fundamentals"],
-                quick_model=quick_model,
-                deep_model=deep_model,
-                llm_provider=llm_provider,
-                market_type=getattr(task.parameters, 'market_type', "A股"),
-                quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
-            )
-
-            # 获取TradingAgents实例
-            trading_graph = self._get_trading_graph(config)
-
-            # 执行分析
-            from datetime import timezone
-            start_time = datetime.now(timezone.utc)
-            analysis_date = task.parameters.analysis_date or datetime.now().strftime("%Y-%m-%d")
-
-            # 调用现有的分析方法（同步调用）
-            from tradingagents.agents.utils.agent_context import AgentContext
-            # 获取用户风险偏好并注入到 AgentContext
-            risk_preference = self._get_user_risk_preference(str(task.user_id))
-            ctx = AgentContext(user_id=str(task.user_id), preference_id=risk_preference)
-            logger.info(f"[diagnose] inject AgentContext task_id={task.task_id} user_id={task.user_id} symbol={task.symbol} date={analysis_date} risk_preference={risk_preference}")
-            _, decision = trading_graph.propagate(task.symbol, analysis_date, agent_context=ctx.__dict__)
-
-            execution_time = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-            # 从决策中提取模型信息
-            model_info = decision.get('model_info', 'Unknown') if isinstance(decision, dict) else 'Unknown'
-
-            # 构建结果
-            result = AnalysisResult(
-                analysis_id=str(uuid.uuid4()),
-                summary=decision.get("summary", ""),
-                recommendation=decision.get("recommendation", ""),
-                confidence_score=decision.get("confidence_score", 0.0),
-                risk_level=decision.get("risk_level", "中等"),
-                key_points=decision.get("key_points", []),
-                detailed_analysis=decision,
-                execution_time=execution_time,
-                tokens_used=decision.get("tokens_used", 0),
-                model_info=model_info  # 🔥 添加模型信息字段
-            )
-
-            logger.info(f"✅ [线程池] 分析任务完成: {task.task_id} - 耗时{execution_time:.2f}秒")
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ [线程池] 执行分析任务失败: {task.task_id} - {e}")
-            raise
 
     async def _execute_single_analysis_async(self, task: AnalysisTask):
         """异步执行单股分析任务（在后台运行，不阻塞主线程）"""
@@ -481,7 +200,7 @@ class AnalysisService:
                 model_name = deep_model or quick_model or "qwen-plus"
 
                 # 根据模型名称确定供应商
-                from app.services.simple_analysis_service import get_provider_by_model_name
+                from app.services.llm_model_resolution import get_provider_by_model_name
                 provider = get_provider_by_model_name(model_name)
 
                 # 记录使用情况
@@ -731,133 +450,6 @@ class AnalysisService:
             "详见 docs/99-archive/deprecated-features/legacy-agents-deprecation.md"
             % getattr(task, "task_id", "<unknown>")
         )
-        # pragma: no cover - 以下原代码保留但不执行，为 v4.0 删除做准备
-        try:
-            logger.info(f"开始执行分析任务: {task.task_id} - {task.symbol}")
-            
-            # 更新任务状态
-            await self._update_task_status(task.task_id, AnalysisStatus.PROCESSING, 0)
-            
-            if progress_callback:
-                progress_callback(10, "初始化分析引擎...")
-            
-            # 使用标准配置函数创建完整配置 - 与单股分析保持一致
-            from app.core.unified_config import unified_config
-
-            quick_model = getattr(task.parameters, 'quick_analysis_model', None) or unified_config.get_quick_analysis_model()
-            deep_model = getattr(task.parameters, 'deep_analysis_model', None) or unified_config.get_deep_analysis_model()
-
-            # 🔧 从数据库读取模型的完整配置参数
-            quick_model_config = None
-            deep_model_config = None
-            llm_configs = unified_config.get_llm_configs()
-
-            for llm_config in llm_configs:
-                if llm_config.model_name == quick_model:
-                    quick_model_config = {
-                        "max_tokens": llm_config.max_tokens,
-                        "temperature": llm_config.temperature,
-                        "timeout": llm_config.timeout,
-                        "retry_times": llm_config.retry_times,
-                        "api_base": llm_config.api_base
-                    }
-                    if getattr(llm_config, "reasoning_effort", None):
-                        quick_model_config["reasoning_effort"] = llm_config.reasoning_effort
-
-                if llm_config.model_name == deep_model:
-                    deep_model_config = {
-                        "max_tokens": llm_config.max_tokens,
-                        "temperature": llm_config.temperature,
-                        "timeout": llm_config.timeout,
-                        "retry_times": llm_config.retry_times,
-                        "api_base": llm_config.api_base
-                    }
-                    if getattr(llm_config, "reasoning_effort", None):
-                        deep_model_config["reasoning_effort"] = llm_config.reasoning_effort
-
-            # 根据模型名称动态查找供应商
-            llm_provider = await get_provider_by_model_name(quick_model)
-
-            # 使用标准配置函数创建完整配置
-            config = create_analysis_config(
-                research_depth=task.parameters.research_depth,
-                selected_analysts=task.parameters.selected_analysts or ["market", "fundamentals"],
-                quick_model=quick_model,
-                deep_model=deep_model,
-                llm_provider=llm_provider,
-                market_type=getattr(task.parameters, 'market_type', "A股"),
-                quick_model_config=quick_model_config,  # 传递模型配置
-                deep_model_config=deep_model_config     # 传递模型配置
-            )
-            
-            if progress_callback:
-                progress_callback(30, "创建分析图...")
-            
-            # 获取TradingAgents实例
-            trading_graph = self._get_trading_graph(config)
-            
-            if progress_callback:
-                progress_callback(50, "执行股票分析...")
-            
-            # 执行分析
-            start_time = datetime.utcnow()
-            analysis_date = task.parameters.analysis_date or datetime.now().strftime("%Y-%m-%d")
-            
-            # 调用现有的分析方法
-            from tradingagents.agents.utils.agent_context import AgentContext
-            # 获取用户风险偏好并注入到 AgentContext
-            risk_preference = self._get_user_risk_preference(str(task.user_id))
-            ctx = AgentContext(user_id=str(task.user_id), preference_id=risk_preference)
-            logger.info(f"[diagnose] inject AgentContext task_id={task.task_id} user_id={task.user_id} symbol={task.symbol} date={analysis_date} risk_preference={risk_preference}")
-            _, decision = trading_graph.propagate(task.symbol, analysis_date, agent_context=ctx.__dict__)
-            
-            execution_time = (datetime.utcnow() - start_time).total_seconds()
-            
-            if progress_callback:
-                progress_callback(80, "处理分析结果...")
-
-            # 从决策中提取模型信息
-            model_info = decision.get('model_info', 'Unknown') if isinstance(decision, dict) else 'Unknown'
-
-            # 构建结果
-            result = AnalysisResult(
-                analysis_id=str(uuid.uuid4()),
-                summary=decision.get("summary", ""),
-                recommendation=decision.get("recommendation", ""),
-                confidence_score=decision.get("confidence_score", 0.0),
-                risk_level=decision.get("risk_level", "中等"),
-                key_points=decision.get("key_points", []),
-                detailed_analysis=decision,
-                execution_time=execution_time,
-                tokens_used=decision.get("tokens_used", 0),
-                model_info=model_info  # 🔥 添加模型信息字段
-            )
-
-            if progress_callback:
-                progress_callback(100, "研究完成")
-
-            # 更新任务状态
-            await self._update_task_status(task.task_id, AnalysisStatus.COMPLETED, 100, result)
-
-            # 记录 token 使用
-            try:
-                # 记录使用情况
-                await self._record_token_usage(task, result, llm_provider, deep_model or quick_model)
-            except Exception as e:
-                logger.error(f"⚠️  记录 token 使用失败: {e}")
-
-            logger.info(f"分析任务完成: {task.task_id} - 耗时{execution_time:.2f}秒")
-
-            return result
-            
-        except Exception as e:
-            logger.error(f"执行分析任务失败: {task.task_id} - {e}")
-            
-            # 更新任务状态为失败
-            error_result = AnalysisResult(error_message=str(e))
-            await self._update_task_status(task.task_id, AnalysisStatus.FAILED, 0, error_result)
-            
-            raise
     
     async def _update_task_status(
         self,
