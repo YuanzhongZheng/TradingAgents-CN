@@ -85,6 +85,7 @@ from .technical.crossover_signals import get_crossover_signals
 from .technical.support_resistance import get_support_resistance_levels
 from .technical.chart_patterns import get_chart_patterns
 from .technical.fibonacci_tools import get_fibonacci_retracement
+from .technical.price_structure import analyze_chanlun, analyze_elliott_wave
 
 # 导入 P1 新增工具
 from .fundamentals.macro_tools import (
@@ -250,6 +251,8 @@ __all__ = [
     'get_support_resistance_levels',
     'get_chart_patterns',
     'get_fibonacci_retracement',
+    'analyze_chanlun',
+    'analyze_elliott_wave',
     # P1-宏观/事件/选股
     'get_macro_dashboard',
     'get_yield_curve_analysis',

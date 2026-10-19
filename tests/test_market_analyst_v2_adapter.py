@@ -43,6 +43,7 @@ def test_execute_uses_default_analysis_prompt(monkeypatch):
 
     agent._build_system_prompt = lambda market_type=None, context=None, state=None: "SYSTEM"
     agent._build_user_prompt = lambda ticker, analysis_date, state: "USER"
+    agent._append_price_structure = lambda prompt, ticker, analysis_date: prompt
     agent._build_analysis_prompt = lambda ticker: "ANALYSIS"
 
     captured = {}

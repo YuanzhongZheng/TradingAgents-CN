@@ -112,7 +112,9 @@ class MarketAnalystV2(AnalystAgent):
         version="2.0.0",
         license_tier=LicenseTier.FREE,
         default_tools=[
-            "get_stock_market_data_unified"
+            "get_stock_market_data_unified",
+            "analyze_chanlun",
+            "analyze_elliott_wave",
         ],
         inputs=[
             AgentInput(name="ticker", type="string", description="股票代码"),
@@ -199,6 +201,7 @@ class MarketAnalystV2(AnalystAgent):
             user_prompt = user_override
             if not user_prompt:
                 user_prompt = self._build_user_prompt(ticker, analysis_date, state)
+            user_prompt = self._append_price_structure(user_prompt, ticker, analysis_date)
 
             analysis_prompt = analysis_override or self._build_analysis_prompt(ticker)
 
@@ -298,7 +301,9 @@ class MarketAnalystV2(AnalystAgent):
 1. 分析股票的价格走势（涨跌幅、趋势方向）
 2. 分析技术指标（MA、MACD、RSI、KDJ等）
 3. 分析成交量（放量、缩量、量价关系）
-4. 综合判断市场情绪和趋势
+4. 按周线、日线、30分钟、5分钟整理缠论结构（笔、中枢、背驰观察）
+5. 按同样四个周期整理波浪结构（拐点与浪型归类）
+6. 综合判断市场情绪和趋势
 
 分析要求：
 - 客观、专业、基于数据
@@ -311,6 +316,8 @@ class MarketAnalystV2(AnalystAgent):
 - 价格走势分析
 - 技术指标分析
 - 成交量分析
+- 缠论结构（周线、日线、30分钟、5分钟）
+- 波浪结构（周线、日线、30分钟、5分钟）
 - 综合判断
 """
 
@@ -415,6 +422,25 @@ class MarketAnalystV2(AnalystAgent):
 
 请调用工具获取市场数据，然后生成详细的市场分析报告。"""
 
+    def _append_price_structure(self, user_prompt: str, ticker: str, analysis_date: str) -> str:
+        """把四个默认周期的缠论和波浪结果放进用户消息，避免提示词模板漏掉它们。"""
+        try:
+            from core.tools.implementations.technical.price_structure import (
+                build_price_structure_context,
+            )
+            structure_context = build_price_structure_context(ticker, analysis_date)
+        except Exception as exc:
+            logger.warning("价格结构计算失败，市场分析继续: %s", exc)
+            return user_prompt
+        if not structure_context:
+            return user_prompt
+        return (
+            f"{user_prompt}\n\n"
+            "以下是按规则算出的缠论和波浪结构，默认周期为周线、日线、30分钟、5分钟。"
+            "报告必须单独写出「缠论结构」和「波浪结构」，并且只能引用这里的事实。\n"
+            f"{structure_context}"
+        )
+
     def _build_analysis_prompt(self, ticker: str) -> str:
         """构建工具调用后的专业分析提示词。"""
         return f"""基于获取的数据，请生成 {ticker} 的专业市场结构研究报告，包括：
@@ -429,9 +455,15 @@ class MarketAnalystV2(AnalystAgent):
     - 短期趋势（5-10个交易日）
     - 中期趋势（20-60个交易日）
     - 成交量分析
-4. 综合评估
-5. 对整体研究结论的影响
-6. 后续观察点
+4. 缠论结构
+    - 分别写周线、日线、30分钟、5分钟
+    - 只引用工具给出的笔、中枢和背驰观察
+5. 波浪结构
+    - 分别写周线、日线、30分钟、5分钟
+    - 只引用工具给出的拐点、浪段和结构归类
+6. 综合评估
+7. 对整体研究结论的影响
+8. 后续观察点
 
 如果工具返回的实际数据日期不同于分析日期，必须在正文中明确写出实际数据日期。
 股票基本信息中的实际数据日期只能引用工具明确返回的“实际数据日期”或“最新有效日线日期”；如果分析日期是今天但工具显示最新有效日线仍为更早日期，禁止把分析日期直接写成实际数据日期。

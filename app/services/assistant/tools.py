@@ -251,6 +251,8 @@ _CORE_ASSISTANT_TOOL_NAMES = frozenset({
     "get_analysis_status",
     "list_positions",
     "get_position_analysis",
+    "analyze_chanlun",
+    "analyze_elliott_wave",
     "remember_this",
 })
 _ASSISTANT_TOOL_SOFT_LIMIT = 64
