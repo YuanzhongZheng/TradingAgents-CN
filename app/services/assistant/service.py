@@ -615,10 +615,16 @@ class IntelligentAssistantService:
             except Exception:
                 pass
 
-        async def _do_chat(_retry_attempt: int = 0) -> str:
+        async def _do_chat(_retry_attempt: int = 0, _recover_tools: bool = False) -> str:
             tool_interceptor = self._build_tool_interceptor(conversation_id or "default")
             achat_kwargs: Dict[str, Any] = dict(
-                tools=select_assistant_tools(self._openai_tools or [], user_message),
+                tools=select_assistant_tools(
+                    self._openai_tools or [],
+                    user_message,
+                    history_text=assistant_history_text(req.history_messages),
+                    used_tool_names=list(tools_used or []),
+                    recover=_recover_tools,
+                ),
                 auto_execute_tools=True,
                 max_tool_rounds=8,
                 tools_used=tools_used,
@@ -678,6 +684,22 @@ class IntelligentAssistantService:
 
             # ── 回复后四道防线（第①级降级：反馈重答，最多 1 次）──
             reply_content = resp.content or ""
+            catalog = self._openai_tools or []
+            if (
+                not _recover_tools
+                and len(catalog) > 64
+                and reply_requests_missing_tool(reply_content)
+            ):
+                quality_signals.append("tool_catalog_recover")
+                logger.warning("[智能助手] 回复表示缺少工具，使用更宽的工具表重试")
+                messages.append(Message(
+                    role=MessageRole.USER,
+                    content=(
+                        "上一轮工具表可能漏了完成这个请求所需的工具。"
+                        "请在补充后的工具里重新选择并调用，不要直接说没有工具。"
+                    ),
+                ))
+                return await _do_chat(_retry_attempt, True)
             trusted_texts = _extract_history_tool_contents(messages) + memory_trusted_contents
 
             if _has_fabricated_tool_json(reply_content):
@@ -1082,6 +1104,8 @@ from app.services.assistant.tools import (
     _matches_generated_skill,
     _rewrite_number_selection_reply,
     _should_use_recent_search,
+    assistant_history_text,
+    reply_requests_missing_tool,
     select_assistant_tools,
 )
 from app.services.assistant.prompts import (

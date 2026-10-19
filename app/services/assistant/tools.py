@@ -259,35 +259,90 @@ _ASSISTANT_TOOL_SOFT_LIMIT = 64
 _ASSISTANT_EXTRA_TOOL_LIMIT = 24
 
 
-def select_assistant_tools(openai_tools: List[Dict[str, Any]], user_message: str) -> List[Dict[str, Any]]:
+_FOLLOWUP_STOPGRAMS = {"好的", "可以", "继续", "一下", "这个", "那个", "还是", "然后", "帮我", "请你"}
+_MISSING_TOOL_MARKERS = (
+    "没有对应的工具",
+    "没有可用工具",
+    "没有找到合适的工具",
+    "工具列表里没有",
+    "工具表里没有",
+    "当前工具无法",
+    "无法导出",
+    "不能导出",
+    "没法导出",
+)
+
+
+def assistant_history_text(history_messages) -> str:
+    """取最近几轮对话文本，供工具筛选使用。"""
+    parts = []
+    for message in list(history_messages or [])[-8:]:
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            parts.append(content.strip()[:500])
+    return "\n".join(parts)
+
+
+def reply_requests_missing_tool(reply: str) -> bool:
+    text = reply or ""
+    return any(marker in text for marker in _MISSING_TOOL_MARKERS)
+
+
+def select_assistant_tools(
+    openai_tools: List[Dict[str, Any]],
+    user_message: str,
+    history_text: str = "",
+    used_tool_names: Optional[List[str]] = None,
+    recover: bool = False,
+) -> List[Dict[str, Any]]:
     """收窄本轮发给模型的工具表。
 
-    常用行情、财务、新闻和系统工具始终保留。问题和工具描述至少有两个领域词重合时，
-    再补上对应工具。工具本来就不多时保持原样。
+    常用工具和本会话已经用过的工具始终保留。当前问题和最近对话一起做领域词匹配。
+    很短的追问即使只有一个有效词，也保留直接对上的工具。recover 为真时把匹配门槛降到一个词，
+    用来补上第一次没放进工具表的能力。
     """
     if not openai_tools or len(openai_tools) <= _ASSISTANT_TOOL_SOFT_LIMIT:
         return openai_tools
 
-    message_terms = _domain_terms(user_message)
+    used_names = {str(name) for name in (used_tool_names or []) if name}
+    message_terms = _domain_terms(user_message) - _FOLLOWUP_STOPGRAMS
+    context_terms = message_terms | (_domain_terms(history_text) - _FOLLOWUP_STOPGRAMS)
+    context_threshold = 1 if recover else 2
     core: List[Dict[str, Any]] = []
-    ranked: List[tuple] = []
+    seen = set()
+    context_ranked: List[tuple] = []
+    followup_ranked: List[tuple] = []
     for tool in openai_tools:
         function = tool.get("function") or {}
         name = str(function.get("name") or "")
-        if name in _CORE_ASSISTANT_TOOL_NAMES:
-            core.append(tool)
+        if name in _CORE_ASSISTANT_TOOL_NAMES or name in used_names:
+            if name not in seen:
+                core.append(tool)
+                seen.add(name)
             continue
         description = f"{name} {function.get('description') or ''}"
-        overlap = message_terms & _domain_terms(description)
-        if len(overlap) >= 2:
-            ranked.append((len(overlap), name, tool))
+        tool_terms = _domain_terms(description)
+        context_overlap = context_terms & tool_terms
+        message_overlap = message_terms & tool_terms
+        if len(context_overlap) >= context_threshold:
+            context_ranked.append((len(context_overlap), name, tool))
+        elif message_terms and len(message_terms) <= 3 and len(message_overlap) >= 1:
+            followup_ranked.append((len(message_overlap), name, tool))
 
-    ranked.sort(key=lambda item: (-item[0], item[1]))
-    extra = [item[2] for item in ranked[:_ASSISTANT_EXTRA_TOOL_LIMIT]]
+    context_ranked.sort(key=lambda item: (-item[0], item[1]))
+    followup_ranked.sort(key=lambda item: (-item[0], item[1]))
+    extra = []
+    for _score, name, tool in followup_ranked[:8] + context_ranked[:_ASSISTANT_EXTRA_TOOL_LIMIT]:
+        if name in seen:
+            continue
+        extra.append(tool)
+        seen.add(name)
     selected = core + extra
     logger.info(
-        "[智能助手] 工具表从 %d 收窄到 %d（常驻 %d，问题匹配 %d）",
-        len(openai_tools), len(selected), len(core), len(extra),
+        "[智能助手] 工具表从 %d 收窄到 %d（常驻 %d，问题匹配 %d，补救=%s）",
+        len(openai_tools), len(selected), len(core), len(extra), recover,
     )
     return selected
 

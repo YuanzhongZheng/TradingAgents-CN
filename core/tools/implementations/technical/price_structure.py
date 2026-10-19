@@ -1,21 +1,33 @@
-"""缠论与波浪理论的规则化结构计算。
+"""缠论与波浪理论的多周期价格结构。
 
-默认分析周期是周线、日线、30 分钟和 5 分钟。
-计算只使用 K 线高低点，不生成交易指令。
+默认分析周期是周线、日线、30 分钟和 5 分钟。各周期分开计算，结果是候选结构，
+不生成交易指令。算法在 chanlun.py 和 elliott_wave.py，这里负责取数、缓存、
+周期对照和工具入口。
 """
 
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from typing import Annotated, Dict, Iterable, List, Optional, Sequence, Tuple
+from dataclasses import replace
+from datetime import datetime, timedelta
+from typing import Annotated, Dict, List, Optional, Sequence, Tuple
 
 from langchain_core.tools import tool
 
 from core.tools.base import register_tool
 
+from .chanlun import analyze_chanlun_bars, render_chanlun
+from .elliott_wave import analyze_elliott_bars, render_elliott
+from .structure_bars import StructureBar, bars_from_records, direction_label
+
 logger = logging.getLogger(__name__)
+_STRUCTURE_CACHE_TTL_SECONDS = 180
+_STRUCTURE_CACHE: Dict[tuple, tuple] = {}
+_STRUCTURE_LOCKS: Dict[tuple, threading.Lock] = {}
+_STRUCTURE_CACHE_GUARD = threading.Lock()
 
 DEFAULT_STRUCTURE_PERIODS: Tuple[str, ...] = ("week", "day", "30m", "5m")
 PERIOD_LABELS = {
@@ -36,450 +48,167 @@ PERIOD_SWING = {
     "30m": 0.02,
     "5m": 0.01,
 }
-
-
-@dataclass
-class StructureBar:
-    time: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float = 0.0
+_PERIOD_ALIASES = {
+    "weekly": "week",
+    "week": "week",
+    "w": "week",
+    "周": "week",
+    "周线": "week",
+    "daily": "day",
+    "day": "day",
+    "d": "day",
+    "日": "day",
+    "日线": "day",
+    "30": "30m",
+    "30m": "30m",
+    "30min": "30m",
+    "30分钟": "30m",
+    "5": "5m",
+    "5m": "5m",
+    "5min": "5m",
+    "5分钟": "5m",
+}
 
 
 def parse_structure_periods(raw: Optional[str]) -> Tuple[str, ...]:
     if not raw or not str(raw).strip():
         return DEFAULT_STRUCTURE_PERIODS
-    alias = {
-        "weekly": "week",
-        "week": "week",
-        "w": "week",
-        "周": "week",
-        "周线": "week",
-        "daily": "day",
-        "day": "day",
-        "d": "day",
-        "日": "day",
-        "日线": "day",
-        "30": "30m",
-        "30m": "30m",
-        "30min": "30m",
-        "30分钟": "30m",
-        "5": "5m",
-        "5m": "5m",
-        "5min": "5m",
-        "5分钟": "5m",
-    }
     selected = []
     for part in str(raw).replace("，", ",").split(","):
-        key = alias.get(part.strip())
+        key = _PERIOD_ALIASES.get(part.strip())
         if key and key not in selected:
             selected.append(key)
     return tuple(selected) or DEFAULT_STRUCTURE_PERIODS
 
 
-def bars_from_records(records: Iterable[dict]) -> List[StructureBar]:
-    bars: List[StructureBar] = []
-    for row in records or []:
-        try:
-            high = float(row.get("high"))
-            low = float(row.get("low"))
-            close = float(row.get("close"))
-            open_price = float(row.get("open", close))
-        except (TypeError, ValueError):
-            continue
-        if high < low:
-            high, low = low, high
-        volume = row.get("volume", row.get("vol", 0)) or 0
-        try:
-            volume = float(volume)
-        except (TypeError, ValueError):
-            volume = 0.0
-        bars.append(StructureBar(
-            time=str(row.get("time") or row.get("trade_date") or row.get("date") or ""),
-            open=open_price,
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
-        ))
-    return bars
+def _period_label(period: str) -> str:
+    return PERIOD_LABELS.get(period, period)
 
 
-def _ema(values: Sequence[float], period: int) -> List[float]:
-    if not values:
-        return []
-    alpha = 2 / (period + 1)
-    output = [values[0]]
-    for value in values[1:]:
-        output.append(value * alpha + output[-1] * (1 - alpha))
-    return output
+def _bar_day(bar: StructureBar) -> str:
+    digits = "".join(ch for ch in (bar.time or "") if ch.isdigit())
+    if len(digits) < 8:
+        return ""
+    return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
 
 
-def _macd_hist(closes: Sequence[float]) -> List[float]:
-    fast = _ema(closes, 12)
-    slow = _ema(closes, 26)
-    diff = [left - right for left, right in zip(fast, slow)]
-    signal = _ema(diff, 9)
-    return [left - right for left, right in zip(diff, signal)]
+def structure_request_window(period: str, end_date: Optional[str]) -> Tuple[Optional[str], Optional[str], int]:
+    """按根数上限回推开始日期，避免只传截止日期时从 1990 年取数。"""
+    limit = PERIOD_LIMITS.get(period, 120)
+    if not end_date:
+        return None, None, limit
+    digits = "".join(ch for ch in str(end_date) if ch.isdigit())
+    if len(digits) < 8:
+        return None, None, limit
+    end = datetime(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    span_days = {
+        "week": limit * 7 + 21,
+        "day": int(limit * 1.8) + 15,
+        "30m": int(limit / 8 * 2) + 10,
+        "5m": int(limit / 48 * 2) + 5,
+    }.get(period, limit * 2)
+    start = end - timedelta(days=span_days)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"), limit
 
 
-def merge_chanlun_bars(bars: Sequence[StructureBar]) -> List[StructureBar]:
-    """处理 K 线包含关系。向上取高高，向下取低低。"""
-    if not bars:
-        return []
-    merged = [bars[0]]
-    direction = 0
-    for bar in bars[1:]:
-        previous = merged[-1]
-        included = (
-            (bar.high <= previous.high and bar.low >= previous.low)
-            or (previous.high <= bar.high and previous.low >= bar.low)
-        )
-        if not included:
-            if bar.high >= previous.high and bar.low >= previous.low:
-                direction = 1
-            elif bar.high <= previous.high and bar.low <= previous.low:
-                direction = -1
-            merged.append(bar)
-            continue
-        if direction >= 0:
-            high = max(previous.high, bar.high)
-            low = max(previous.low, bar.low)
-        else:
-            high = min(previous.high, bar.high)
-            low = min(previous.low, bar.low)
-        merged[-1] = StructureBar(
-            time=bar.time or previous.time,
-            open=previous.open,
-            high=high,
-            low=low,
-            close=bar.close,
-            volume=previous.volume + bar.volume,
-        )
-    return merged
+def clip_structure_bars(
+    bars: Sequence[StructureBar],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    limit: int,
+) -> Tuple[List[StructureBar], str]:
+    selected = list(bars)
+    if end_date:
+        selected = [
+            bar for bar in selected
+            if _bar_day(bar) and (not start_date or _bar_day(bar) >= start_date) and _bar_day(bar) <= end_date
+        ]
+        if not selected:
+            return [], "unavailable"
+    if limit > 0:
+        selected = selected[-limit:]
+    return [replace(bar, start_index=index, end_index=index) for index, bar in enumerate(selected)], "ok"
 
 
-def chanlun_fractals(bars: Sequence[StructureBar]) -> List[Tuple[str, int, StructureBar]]:
-    fractals = []
-    for index in range(1, len(bars) - 1):
-        left, middle, right = bars[index - 1], bars[index], bars[index + 1]
-        if (
-            middle.high > left.high and middle.high > right.high
-            and middle.low > left.low and middle.low > right.low
-        ):
-            fractals.append(("top", index, middle))
-        elif (
-            middle.low < left.low and middle.low < right.low
-            and middle.high < left.high and middle.high < right.high
-        ):
-            fractals.append(("bottom", index, middle))
-    return fractals
-
-
-def chanlun_bi(fractals: Sequence[Tuple[str, int, StructureBar]]) -> List[Tuple[str, int, StructureBar]]:
-    """相邻分型至少间隔 4 根合并 K 线才构成一笔，同向分型保留更极端的一个。"""
-    strokes: List[Tuple[str, int, StructureBar]] = []
-    for kind, index, bar in fractals:
-        if not strokes:
-            strokes.append((kind, index, bar))
-            continue
-        last_kind, last_index, last_bar = strokes[-1]
-        if kind == last_kind:
-            if kind == "top" and bar.high >= last_bar.high:
-                strokes[-1] = (kind, index, bar)
-            elif kind == "bottom" and bar.low <= last_bar.low:
-                strokes[-1] = (kind, index, bar)
-            continue
-        if index - last_index < 4:
-            continue
-        strokes.append((kind, index, bar))
-    return strokes
-
-
-def chanlun_zhongshu(strokes: Sequence[Tuple[str, int, StructureBar]]) -> List[Dict[str, float]]:
-    segments = []
-    for index in range(len(strokes) - 1):
-        start = strokes[index][2]
-        end = strokes[index + 1][2]
-        segments.append((min(start.low, end.low), max(start.high, end.high)))
-    centers = []
-    cursor = 0
-    while cursor + 2 < len(segments):
-        lows = [segments[cursor + offset][0] for offset in range(3)]
-        highs = [segments[cursor + offset][1] for offset in range(3)]
-        lower = max(lows)
-        upper = min(highs)
-        if upper > lower:
-            centers.append({"lower": lower, "upper": upper, "start_stroke": cursor + 1})
-            cursor += 3
-        else:
-            cursor += 1
-    return centers
-
-
-def _stroke_moves(strokes: Sequence[Tuple[str, int, StructureBar]], hist: Sequence[float]):
-    moves = []
-    for index in range(len(strokes) - 1):
-        start_kind, start_index, start = strokes[index]
-        _end_kind, end_index, end = strokes[index + 1]
-        direction = "down" if start_kind == "top" else "up"
-        price_range = abs(start.high - end.low) if direction == "down" else abs(end.high - start.low)
-        window = hist[start_index:end_index + 1]
-        macd_area = sum(window) if window else 0.0
-        moves.append({
-            "direction": direction,
-            "start": start.time,
-            "end": end.time,
-            "start_price": start.high if direction == "down" else start.low,
-            "end_price": end.low if direction == "down" else end.high,
-            "range": price_range,
-            "macd_area": macd_area,
-        })
-    return moves
-
-
-def analyze_chanlun_bars(bars: Sequence[StructureBar]) -> Dict[str, object]:
-    if len(bars) < 20:
-        return {"status": "insufficient", "bar_count": len(bars)}
-    merged = merge_chanlun_bars(bars)
-    fractals = chanlun_fractals(merged)
-    strokes = chanlun_bi(fractals)
-    centers = chanlun_zhongshu(strokes)
-    hist = _macd_hist([bar.close for bar in merged])
-    moves = _stroke_moves(strokes, hist)
-    divergence = "未形成"
-    same_direction = {}
-    for move in moves:
-        same_direction.setdefault(move["direction"], []).append(move)
-    for direction, label in (("down", "下跌笔疑似背驰"), ("up", "上涨笔疑似背驰")):
-        group = same_direction.get(direction) or []
-        if len(group) < 2:
-            continue
-        previous, latest = group[-2], group[-1]
-        if (
-            latest["range"] < previous["range"]
-            and abs(latest["macd_area"]) < abs(previous["macd_area"])
-            and previous["range"] > 0
-        ):
-            divergence = label
-            break
-    return {
-        "status": "ok",
-        "bar_count": len(bars),
-        "merged_count": len(merged),
-        "strokes": strokes,
-        "moves": moves[-6:],
-        "centers": centers[-2:],
-        "divergence": divergence,
-        "latest_time": bars[-1].time,
-        "latest_close": bars[-1].close,
-    }
-
-
-def zigzag_pivots(bars: Sequence[StructureBar], threshold: float) -> List[Tuple[str, StructureBar]]:
-    if len(bars) < 3 or threshold <= 0:
-        return []
-    pivots: List[Tuple[str, StructureBar]] = []
-    mode: Optional[str] = None
-    extreme = 0
-    for index in range(1, len(bars)):
-        if mode is None:
-            base = bars[0].close or bars[0].high
-            if base <= 0:
-                continue
-            change = (bars[index].close - base) / base
-            if abs(change) < threshold:
-                continue
-            mode = "up" if change > 0 else "down"
-            pivots.append(("low" if mode == "up" else "high", bars[0]))
-            extreme = index
-            continue
-        if mode == "up":
-            if bars[index].high >= bars[extreme].high:
-                extreme = index
-                continue
-            if bars[extreme].high > 0 and (bars[extreme].high - bars[index].low) / bars[extreme].high >= threshold:
-                pivots.append(("high", bars[extreme]))
-                mode = "down"
-                extreme = index
-        else:
-            if bars[index].low <= bars[extreme].low:
-                extreme = index
-                continue
-            if bars[extreme].low > 0 and (bars[index].high - bars[extreme].low) / bars[extreme].low >= threshold:
-                pivots.append(("low", bars[extreme]))
-                mode = "up"
-                extreme = index
-    if mode == "up":
-        pivots.append(("high", bars[extreme]))
-    elif mode == "down":
-        pivots.append(("low", bars[extreme]))
-    return pivots
-
-
-def _price_of(pivot: Tuple[str, StructureBar]) -> float:
-    kind, bar = pivot
-    return bar.high if kind == "high" else bar.low
-
-
-def _label_elliott(pivots: Sequence[Tuple[str, StructureBar]]) -> Dict[str, object]:
-    if len(pivots) < 4:
-        return {"pattern": "样本不足", "waves": []}
-    points = pivots[-6:] if len(pivots) >= 6 else pivots[-4:]
-    prices = [_price_of(point) for point in points]
-    waves = []
-    for index in range(len(points) - 1):
-        start_kind, start_bar = points[index]
-        _end_kind, end_bar = points[index + 1]
-        waves.append({
-            "start": start_bar.time,
-            "end": end_bar.time,
-            "start_price": _price_of(points[index]),
-            "end_price": _price_of(points[index + 1]),
-            "direction": "up" if start_kind == "low" else "down",
-        })
-    pattern = "调整结构"
-    if len(prices) >= 6 and points[0][0] == "low":
-        wave1 = prices[1] - prices[0]
-        wave2_ok = prices[2] > prices[0]
-        wave3 = prices[3] - prices[2]
-        wave5 = prices[5] - prices[4]
-        wave4_ok = prices[4] > prices[1]
-        wave3_not_shortest = wave3 >= wave1 and wave3 >= wave5 and wave3 > 0
-        if wave2_ok and wave4_ok and wave3_not_shortest and prices[3] > prices[1]:
-            pattern = "上升推动五浪"
-            if prices[5] <= prices[3]:
-                pattern = "上升推动五浪，第5浪未创新高"
-    elif len(prices) >= 6 and points[0][0] == "high":
-        wave1 = prices[0] - prices[1]
-        wave2_ok = prices[2] < prices[0]
-        wave3 = prices[2] - prices[3]
-        wave5 = prices[4] - prices[5]
-        wave4_ok = prices[4] < prices[1]
-        wave3_not_shortest = wave3 >= wave1 and wave3 >= wave5 and wave3 > 0
-        if wave2_ok and wave4_ok and wave3_not_shortest and prices[3] < prices[1]:
-            pattern = "下降推动五浪"
-            if prices[5] >= prices[3]:
-                pattern = "下降推动五浪，第5浪未创新低"
-    elif len(prices) >= 4:
-        pattern = "ABC 调整结构"
-    return {"pattern": pattern, "waves": waves[-5:]}
-
-
-def analyze_elliott_bars(bars: Sequence[StructureBar], threshold: float) -> Dict[str, object]:
-    if len(bars) < 20:
-        return {"status": "insufficient", "bar_count": len(bars)}
-    pivots = zigzag_pivots(bars, threshold)
-    labeled = _label_elliott(pivots)
-    return {
-        "status": "ok",
-        "bar_count": len(bars),
-        "threshold": threshold,
-        "pivots": pivots[-8:],
-        "pattern": labeled["pattern"],
-        "waves": labeled["waves"],
-        "latest_time": bars[-1].time,
-        "latest_close": bars[-1].close,
-    }
-
-
-def _fmt(value: float) -> str:
-    return f"{value:.2f}"
-
-
-def render_chanlun(period: str, result: Dict[str, object], source: str = "") -> str:
-    label = PERIOD_LABELS.get(period, period)
-    if result.get("status") != "ok":
-        return f"### {label}\n样本不足（{result.get('bar_count', 0)} 根），不划分笔和中枢。"
-    lines = [
-        f"### {label}",
-        f"- K线 {result['bar_count']} 根，包含处理后 {result['merged_count']} 根，最新收盘 {_fmt(result['latest_close'])}（{result['latest_time']}）",
-    ]
-    if source:
-        lines.append(f"- 数据源: {source}")
-    moves = result.get("moves") or []
-    if moves:
-        lines.append("- 最近的笔:")
-        for move in moves:
-            lines.append(
-                f"  - {move['direction']} {move['start']} {_fmt(move['start_price'])} -> "
-                f"{move['end']} {_fmt(move['end_price'])}"
-            )
-    else:
-        lines.append("- 最近的笔: 未形成有效笔")
-    centers = result.get("centers") or []
-    if centers:
-        last = centers[-1]
-        lines.append(f"- 最近中枢: {_fmt(last['lower'])} - {_fmt(last['upper'])}")
-    else:
-        lines.append("- 最近中枢: 未形成三段重叠")
-    lines.append(f"- 背驰观察: {result['divergence']}")
-    return "\n".join(lines)
-
-
-def render_elliott(period: str, result: Dict[str, object], source: str = "") -> str:
-    label = PERIOD_LABELS.get(period, period)
-    if result.get("status") != "ok":
-        return f"### {label}\n样本不足（{result.get('bar_count', 0)} 根），不划分浪。"
-    lines = [
-        f"### {label}",
-        f"- K线 {result['bar_count']} 根，摆动阈值 {result['threshold']:.0%}，最新收盘 {_fmt(result['latest_close'])}（{result['latest_time']}）",
-        f"- 结构: {result['pattern']}",
-    ]
-    if source:
-        lines.append(f"- 数据源: {source}")
-    pivots = result.get("pivots") or []
-    if pivots:
-        text = " -> ".join(f"{kind} {_fmt(_price_of((kind, bar)))}@{bar.time}" for kind, bar in pivots)
-        lines.append(f"- 拐点: {text}")
-    waves = result.get("waves") or []
-    if waves:
-        lines.append("- 最近浪段:")
-        for index, wave in enumerate(waves, start=1):
-            lines.append(
-                f"  - {index}. {wave['direction']} {wave['start']} {_fmt(wave['start_price'])} -> "
-                f"{wave['end']} {_fmt(wave['end_price'])}"
-            )
-    return "\n".join(lines)
-
-
-def load_structure_bars(symbol: str, period: str, end_date: Optional[str] = None) -> Tuple[List[StructureBar], str]:
+def load_structure_bars(symbol: str, period: str, end_date: Optional[str] = None) -> Tuple[List[StructureBar], str, str]:
     from app.services.data_sources.manager import ANALYSIS_BAR_ADJUST, DataSourceManager
 
     manager = DataSourceManager()
-    use_end = end_date if period in ("day", "week") else None
+    start_date, bounded_end, limit = structure_request_window(period, end_date)
     items, source = manager.get_kline_with_fallback(
         code=symbol,
         period=period,
-        limit=PERIOD_LIMITS.get(period, 120),
+        limit=limit,
         adj=ANALYSIS_BAR_ADJUST,
-        end_date=use_end,
+        start_date=start_date,
+        end_date=bounded_end,
     )
-    return bars_from_records(items or []), source or ""
+    bars, availability = clip_structure_bars(bars_from_records(items or []), start_date, bounded_end, limit)
+    return bars, source or "", availability
 
 
-def _load_period(symbol: str, period: str, end_date: Optional[str]) -> Tuple[str, List[StructureBar], str, str]:
+def _load_period(symbol: str, period: str, end_date: Optional[str]) -> Tuple[str, List[StructureBar], str, str, str]:
     try:
-        bars, source = load_structure_bars(symbol, period, end_date)
-        return period, bars, source, ""
+        bars, source, availability = load_structure_bars(symbol, period, end_date)
+        return period, bars, source, "", availability
     except Exception as exc:
         logger.warning("结构分析读取 %s %s 失败: %s", symbol, period, exc)
-        return period, [], "", str(exc)
+        return period, [], "", str(exc), "error"
 
 
-def analyze_price_structure(
+def _unavailable_result() -> Dict[str, object]:
+    return {"status": "unavailable", "bar_count": 0}
+
+
+def _structure_cache_lock(key: tuple) -> threading.Lock:
+    with _STRUCTURE_CACHE_GUARD:
+        lock = _STRUCTURE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _STRUCTURE_LOCKS[key] = lock
+        return lock
+
+
+def _cached_structure(key: tuple):
+    item = _STRUCTURE_CACHE.get(key)
+    if item is None:
+        return None
+    stored_at, value = item
+    if time.monotonic() - stored_at > _STRUCTURE_CACHE_TTL_SECONDS:
+        _STRUCTURE_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _store_structure(key: tuple, value) -> None:
+    if len(_STRUCTURE_CACHE) > 64:
+        oldest = min(_STRUCTURE_CACHE, key=lambda item: _STRUCTURE_CACHE[item][0])
+        _STRUCTURE_CACHE.pop(oldest, None)
+    _STRUCTURE_CACHE[key] = (time.monotonic(), value)
+
+
+def clear_structure_cache() -> None:
+    with _STRUCTURE_CACHE_GUARD:
+        _STRUCTURE_CACHE.clear()
+
+
+def _analyze_price_structure_uncached(
     symbol: str,
-    end_date: Optional[str] = None,
-    periods: Optional[Sequence[str]] = None,
+    end_date: Optional[str],
+    selected: Sequence[str],
 ) -> Dict[str, Dict[str, object]]:
-    selected = tuple(periods or DEFAULT_STRUCTURE_PERIODS)
-    loaded = []
     with ThreadPoolExecutor(max_workers=min(4, len(selected) or 1)) as pool:
         loaded = list(pool.map(lambda period: _load_period(symbol, period, end_date), selected))
     output = {}
-    for period, bars, source, error in loaded:
+    for period, bars, source, error, availability in loaded:
+        if availability == "unavailable":
+            output[period] = {
+                "source": source,
+                "error": error,
+                "chanlun": _unavailable_result(),
+                "elliott": _unavailable_result(),
+            }
+            continue
         output[period] = {
             "source": source,
             "error": error,
@@ -489,20 +218,87 @@ def analyze_price_structure(
     return output
 
 
-def render_price_structure(symbol: str, results: Dict[str, Dict[str, object]]) -> str:
-    period_text = "、".join(PERIOD_LABELS[item] for item in results)
-    chanlun_parts = ["## 缠论结构", f"默认周期：{period_text}。下面只记录已经算出来的笔、中枢和背驰观察。"]
-    elliott_parts = ["## 波浪结构", f"默认周期：{period_text}。下面只记录摆动拐点和对最近一段的浪型归类。"]
+def analyze_price_structure(
+    symbol: str,
+    end_date: Optional[str] = None,
+    periods: Optional[Sequence[str]] = None,
+) -> Dict[str, Dict[str, object]]:
+    selected = tuple(periods or DEFAULT_STRUCTURE_PERIODS)
+    key = (symbol, end_date or "", selected)
+    cached = _cached_structure(key)
+    if cached is not None:
+        return cached
+    with _structure_cache_lock(key):
+        cached = _cached_structure(key)
+        if cached is not None:
+            return cached
+        result = _analyze_price_structure_uncached(symbol, end_date, selected)
+        _store_structure(key, result)
+        return result
+
+
+def render_cross_period(results: Dict[str, Dict[str, object]]) -> str:
+    """各周期最近一笔方向和波浪候选的并排对照，不推导级别之间的包含关系。"""
+    lines = [
+        "## 周期对照",
+        "这里只并排比较各周期最近一笔的方向和波浪候选，不是级别联立，也不推导次级别走势是否完成。",
+    ]
+    directions: List[Tuple[str, str]] = []
     for period, payload in results.items():
-        if payload.get("error"):
-            label = PERIOD_LABELS.get(period, period)
-            chanlun_parts.append(f"### {label}\n读取失败: {payload['error']}")
-            elliott_parts.append(f"### {label}\n读取失败: {payload['error']}")
+        label = _period_label(period)
+        chan = payload.get("chanlun") or {}
+        wave = payload.get("elliott") or {}
+        if payload.get("error") or chan.get("status") != "ok":
+            lines.append(f"- {label}: 没有可用结构")
             continue
-        source = str(payload.get("source") or "")
-        chanlun_parts.append(render_chanlun(period, payload["chanlun"], source))
-        elliott_parts.append(render_elliott(period, payload["elliott"], source))
-    return f"# {symbol} 价格结构\n\n" + "\n\n".join(chanlun_parts + [""] + elliott_parts)
+        direction = chan.get("last_direction")
+        stroke_text = f"最近一笔{direction_label(direction)}" if direction else "尚未形成完整的笔"
+        wave_text = wave.get("core_pattern") or "样本不足"
+        if wave.get("terminal_status") == "candidate":
+            wave_text += "（末端未确认）"
+        lines.append(f"- {label}: {stroke_text}；{chan.get('center_position', '')}；波浪 {wave_text}")
+        if direction:
+            directions.append((label, direction))
+    if len(directions) >= 2:
+        pairs = []
+        for (left_label, left), (right_label, right) in zip(directions, directions[1:]):
+            relation = "同向" if left == right else "反向"
+            pairs.append(f"{left_label}与{right_label}{relation}")
+        lines.append("- 相邻周期最近一笔: " + "，".join(pairs))
+    return "\n".join(lines)
+
+
+def _period_section(kind: str, period: str, payload: Dict[str, object]) -> str:
+    label = _period_label(period)
+    if payload.get("error"):
+        return f"### {label}\n读取失败: {payload['error']}"
+    source = str(payload.get("source") or "")
+    if kind == "chanlun":
+        return render_chanlun(label, payload["chanlun"], source)
+    return render_elliott(label, payload["elliott"], source)
+
+
+def render_price_structure(symbol: str, results: Dict[str, Dict[str, object]]) -> str:
+    period_text = "、".join(_period_label(item) for item in results)
+    chanlun_parts = [
+        "## 缠论结构",
+        (
+            f"默认周期：{period_text}。四个周期分开计算，没有跨周期对应，不能称为多级别联合分析。"
+            "下面是笔和三笔重叠近似，背驰只到候选，不是已确认的缠论事实。"
+        ),
+    ]
+    elliott_parts = [
+        "## 波浪结构",
+        (
+            f"默认周期：{period_text}。四个周期分开计算，没有跨周期对应。"
+            "下面只是已确认摆动拐点上的候选形态，没有验证内部子浪。"
+        ),
+    ]
+    for period, payload in results.items():
+        chanlun_parts.append(_period_section("chanlun", period, payload))
+        elliott_parts.append(_period_section("elliott", period, payload))
+    sections = ["\n\n".join(chanlun_parts), "\n\n".join(elliott_parts), render_cross_period(results)]
+    return f"# {symbol} 价格结构\n\n" + "\n\n".join(sections)
 
 
 def build_price_structure_context(symbol: str, end_date: Optional[str] = None) -> str:
@@ -513,20 +309,11 @@ def build_price_structure_context(symbol: str, end_date: Optional[str] = None) -
 def _tool_report(kind: str, ticker: str, analysis_date: str, periods: str) -> str:
     selected = parse_structure_periods(periods)
     results = analyze_price_structure(ticker, end_date=analysis_date or None, periods=selected)
-    if kind == "chanlun":
-        parts = [f"# {ticker} 缠论结构", "默认周期：周线、日线、30分钟、5分钟。"]
-        for period, payload in results.items():
-            if payload.get("error"):
-                parts.append(f"### {PERIOD_LABELS.get(period, period)}\n读取失败: {payload['error']}")
-            else:
-                parts.append(render_chanlun(period, payload["chanlun"], str(payload.get("source") or "")))
-        return "\n\n".join(parts)
-    parts = [f"# {ticker} 波浪结构", "默认周期：周线、日线、30分钟、5分钟。"]
-    for period, payload in results.items():
-        if payload.get("error"):
-            parts.append(f"### {PERIOD_LABELS.get(period, period)}\n读取失败: {payload['error']}")
-        else:
-            parts.append(render_elliott(period, payload["elliott"], str(payload.get("source") or "")))
+    period_text = "、".join(_period_label(item) for item in results)
+    title = "缠论结构" if kind == "chanlun" else "波浪结构"
+    parts = [f"# {ticker} {title}", f"周期：{period_text}。各周期分开计算，结果是候选结构。"]
+    parts.extend(_period_section(kind, period, payload) for period, payload in results.items())
+    parts.append(render_cross_period(results))
     return "\n\n".join(parts)
 
 
@@ -534,7 +321,10 @@ def _tool_report(kind: str, ticker: str, analysis_date: str, periods: str) -> st
 @register_tool(
     tool_id="analyze_chanlun",
     name="缠论结构分析",
-    description="按缠论规则划分笔、中枢和背驰观察。默认周期为周线、日线、30分钟、5分钟。",
+    description=(
+        "按笔和三笔重叠近似整理价格结构，在重叠区间背景下比较进入段与离开段的力度，"
+        "背驰只给出候选。默认周期为周线、日线、30分钟、5分钟。"
+    ),
     category="technical",
     is_online=True,
     auto_register=True,
@@ -558,7 +348,10 @@ def analyze_chanlun(
 @register_tool(
     tool_id="analyze_elliott_wave",
     name="波浪结构分析",
-    description="按摆动拐点划分波浪结构，检查推动浪的基本规则。默认周期为周线、日线、30分钟、5分钟。",
+    description=(
+        "按已确认摆动拐点给出波浪候选，逐条检查推动浪规则并列出常见比例，"
+        "单独标出未确认的末端拐点。不验证内部子浪。默认周期为周线、日线、30分钟、5分钟。"
+    ),
     category="technical",
     is_online=True,
     auto_register=True,
