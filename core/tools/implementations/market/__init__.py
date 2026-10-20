@@ -1,56 +1,60 @@
-"""市场数据工具"""
+"""市场数据工具
 
-from .stock_market_data import get_stock_market_data_unified
-from .china_market_overview import get_china_market_overview
-from .technical_indicators import get_technical_indicators
-from .technical_factor_bundle_tool import get_technical_factor_bundle_tool
-from .qmt_market_tools import get_market_overview_qmt, get_sector_analysis_qmt
-from .dongchedi_sales_rank import get_auto_brand_monthly_sales
+按需导入：导入包本身不会加载工具实现；全量发现请用 ToolRegistry.list_all()。
+"""
 
-# 大盘/指数分析工具
-from .index_market_tools import (
-    get_index_data,
-    get_market_breadth,
-    get_market_environment,
-    get_market_overview,
-    identify_market_cycle,
-    # 新增大盘分析工具
-    get_north_flow,
-    get_margin_trading,
-    get_limit_stats,
-    get_index_technical,
-)
+from core.tools._lazy import resolve_export
 
-# 板块分析工具
-from .sector_market_tools import (
-    get_sector_data,
-    get_fund_flow_data,
-    get_peer_comparison,
-    analyze_sector,
-)
+_EXPORTS = {
+    'get_stock_market_data_unified': ('.stock_market_data', 'get_stock_market_data_unified'),
+    'get_china_market_overview': ('.china_market_overview', 'get_china_market_overview'),
+    'get_technical_indicators': ('.technical_indicators', 'get_technical_indicators'),
+    'get_technical_factor_bundle_tool': ('.technical_factor_bundle_tool', 'get_technical_factor_bundle_tool'),
+    'get_market_overview_qmt': ('.qmt_market_tools', 'get_market_overview_qmt'),
+    'get_sector_analysis_qmt': ('.qmt_market_tools', 'get_sector_analysis_qmt'),
+    'get_auto_brand_monthly_sales': ('.dongchedi_sales_rank', 'get_auto_brand_monthly_sales'),
+    'get_index_data': ('.index_market_tools', 'get_index_data'),
+    'get_market_breadth': ('.index_market_tools', 'get_market_breadth'),
+    'get_market_environment': ('.index_market_tools', 'get_market_environment'),
+    'get_market_overview': ('.index_market_tools', 'get_market_overview'),
+    'identify_market_cycle': ('.index_market_tools', 'identify_market_cycle'),
+    'get_north_flow': ('.index_market_tools', 'get_north_flow'),
+    'get_margin_trading': ('.index_market_tools', 'get_margin_trading'),
+    'get_limit_stats': ('.index_market_tools', 'get_limit_stats'),
+    'get_index_technical': ('.index_market_tools', 'get_index_technical'),
+    'get_sector_data': ('.sector_market_tools', 'get_sector_data'),
+    'get_fund_flow_data': ('.sector_market_tools', 'get_fund_flow_data'),
+    'get_peer_comparison': ('.sector_market_tools', 'get_peer_comparison'),
+    'analyze_sector': ('.sector_market_tools', 'analyze_sector'),
+}
 
 __all__ = [
-    "get_stock_market_data_unified",
-    "get_china_market_overview",
-    "get_technical_indicators",
-    "get_technical_factor_bundle_tool",
-    # 大盘/指数分析工具
-    "get_index_data",
-    "get_market_breadth",
-    "get_market_environment",
-    "get_market_overview",
-    "identify_market_cycle",
-    "get_north_flow",
-    "get_margin_trading",
-    "get_limit_stats",
-    "get_index_technical",
-    "get_market_overview_qmt",
-    "get_auto_brand_monthly_sales",
-    # 板块分析工具
-    "get_sector_data",
-    "get_fund_flow_data",
-    "get_peer_comparison",
-    "analyze_sector",
-    "get_sector_analysis_qmt",
+    'get_stock_market_data_unified',
+    'get_china_market_overview',
+    'get_technical_indicators',
+    'get_technical_factor_bundle_tool',
+    'get_index_data',
+    'get_market_breadth',
+    'get_market_environment',
+    'get_market_overview',
+    'identify_market_cycle',
+    'get_north_flow',
+    'get_margin_trading',
+    'get_limit_stats',
+    'get_index_technical',
+    'get_market_overview_qmt',
+    'get_auto_brand_monthly_sales',
+    'get_sector_data',
+    'get_fund_flow_data',
+    'get_peer_comparison',
+    'analyze_sector',
+    'get_sector_analysis_qmt',
 ]
 
+
+def __getattr__(name):
+    return resolve_export(name, _EXPORTS, globals())
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))

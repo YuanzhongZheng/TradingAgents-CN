@@ -1,6 +1,22 @@
-"""社交媒体和情绪分析工具"""
+"""社交媒体和情绪分析工具
 
-from .stock_sentiment import get_stock_sentiment_unified
+按需导入：导入包本身不会加载工具实现；全量发现请用 ToolRegistry.list_all()。
+"""
 
-__all__ = ['get_stock_sentiment_unified']
+from core.tools._lazy import resolve_export
 
+_EXPORTS = {
+    'get_stock_sentiment_unified': ('.stock_sentiment', 'get_stock_sentiment_unified'),
+}
+
+__all__ = [
+    'get_stock_sentiment_unified',
+]
+
+
+def __getattr__(name):
+    return resolve_export(name, _EXPORTS, globals())
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))

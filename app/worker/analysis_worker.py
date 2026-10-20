@@ -361,16 +361,7 @@ class AnalysisWorker:
             
             # 🔥 初始化工具注册表（必须在执行任务前初始化，确保工具可用）
             try:
-                # 1. 显式导入工具实现模块，触发 @register_tool 装饰器
-                logger.info("🔄 开始加载工具实现模块...")
-                try:
-                    # 导入工具实现模块的 __init__.py，这会触发所有工具的自动注册
-                    import core.tools.implementations
-                    logger.info("✅ 工具实现模块已导入")
-                except Exception as e:
-                    logger.warning(f"⚠️ 导入工具实现模块失败: {e}")
-                
-                # 2. 创建 ToolRegistry 实例（会自动加载所有工具模块）
+                # Worker 启动时显式预热完整工具目录；普通导入和定向查询按需加载。
                 from core.tools.registry import ToolRegistry
                 registry = ToolRegistry()
                 tool_count = len(registry.list_all())

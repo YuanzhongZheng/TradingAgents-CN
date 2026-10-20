@@ -8,7 +8,6 @@ import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional, get_type_hints
 from abc import ABC, abstractmethod
-from langchain_core.tools import tool as langchain_tool
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +60,8 @@ class BaseTool(ABC):
     
     def to_langchain_tool(self):
         """转换为 LangChain Tool"""
+        from langchain_core.tools import tool as langchain_tool
+
         @langchain_tool
         def wrapped_tool(*args, **kwargs):
             if not self.validate_params(**kwargs):
@@ -177,6 +178,7 @@ def _auto_register_class(tool_class: type, **kwargs):
             category=tool_class.category,
             description=tool_class.description,
             is_online=tool_class.is_online,
+            _auto_discovered=True,
             **kwargs
         )
         
@@ -273,6 +275,7 @@ def _auto_register_function(func: Callable, parameters: Optional[List] = None, t
             is_online=func._tool_is_online,
             parameters=parameters,
             timeout_tier=timeout_tier,
+            _auto_discovered=True,
             **kwargs
         )
 

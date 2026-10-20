@@ -1,5 +1,4 @@
-"""
-技术指标计算库
+"""技术指标计算库
 
 这是一个独立的技术指标计算库，提供纯函数式的指标计算功能。
 不注册为LangChain工具，供其他模块直接调用。
@@ -27,47 +26,48 @@
 
     # 计算MACD
     macd_df = macd(df['close'], fast=12, slow=26, signal=9)
+
+按需导入：导入包本身不会加载工具实现；全量发现请用 ToolRegistry.list_all()。
 """
 
-from .indicators import (
-    # 基础指标
-    ma,
-    ema,
-    macd,
-    rsi,
-    boll,
-    atr,
-    kdj,
+from core.tools._lazy import resolve_export
 
-    # 辅助函数
-    compute_indicator,
-    compute_many,
-    last_values,
-    add_all_indicators,
-
-    # 数据类
-    IndicatorSpec,
-    SUPPORTED,
-)
+_EXPORTS = {
+    'ma': ('.indicators', 'ma'),
+    'ema': ('.indicators', 'ema'),
+    'macd': ('.indicators', 'macd'),
+    'rsi': ('.indicators', 'rsi'),
+    'boll': ('.indicators', 'boll'),
+    'atr': ('.indicators', 'atr'),
+    'kdj': ('.indicators', 'kdj'),
+    'compute_indicator': ('.indicators', 'compute_indicator'),
+    'compute_many': ('.indicators', 'compute_many'),
+    'last_values': ('.indicators', 'last_values'),
+    'add_all_indicators': ('.indicators', 'add_all_indicators'),
+    'IndicatorSpec': ('.indicators', 'IndicatorSpec'),
+    'SUPPORTED': ('.indicators', 'SUPPORTED'),
+}
 
 __all__ = [
-    # 基础指标
-    "ma",
-    "ema",
-    "macd",
-    "rsi",
-    "boll",
-    "atr",
-    "kdj",
-
-    # 辅助函数
-    "compute_indicator",
-    "compute_many",
-    "last_values",
-    "add_all_indicators",
-
-    # 数据类
-    "IndicatorSpec",
-    "SUPPORTED",
+    'ma',
+    'ema',
+    'macd',
+    'rsi',
+    'boll',
+    'atr',
+    'kdj',
+    'compute_indicator',
+    'compute_many',
+    'last_values',
+    'add_all_indicators',
+    'IndicatorSpec',
+    'SUPPORTED',
 ]
 
+
+def __getattr__(name):
+    return resolve_export(name, _EXPORTS, globals())
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))

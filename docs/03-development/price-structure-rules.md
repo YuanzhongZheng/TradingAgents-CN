@@ -83,3 +83,29 @@ BaoStock 的 socket 默认超时仅在它自己的子进程内设置，不修改
 应用生命周期结束和正常解释器退出都会请求停止后台下载、回收工作进程。配置改变会重建相应 SDK 进程。以上限制按后端进程计数，多 worker 部署需乘以 worker 数量。直接调用适配器的其他接口（如同步股票列表、持仓导入）不在本次 K 线隔离范围内。终止客户端也不保证撤销 QMT 服务已经接受的后台下载。
 
 `tests/unit/test_market_process_isolation.py` 使用真实 OS 子进程验证忽略 SIGTERM 的永久阻塞、连续回收与恢复、崩溃、过期响应、有界排队、熔断、配置切换和退出清理；另通过假 BaoStock SDK 验证生产子进程入口。测试不连接真实 QMT 终端或真实行情服务。
+
+## 工具按需加载与线段增量计算
+
+`core.tools`、`implementations` 及分类包使用延迟导出，原有 `from ... import ...` 接口继续可用。直接导入 `chanlun`、`elliott_wave`、`chanlun_segments` 等纯算法不会构造工具注册表，也不会加载 pandas、LangChain 或行情 SDK。算法与工具注册的依赖边界通过独立 Python 进程测试。
+
+`ToolRegistry()` 仅复制内置元数据；`get`、`get_function`、`get_by_ids`、`get_langchain_tool` 按工具 ID 导入对应模块，再取得装饰器补全后的参数与实现。多个工具同属一个模块时一并注册。`list_all` 及类别/在线筛选仍执行一次完整发现，保留 Legacy Bridge、助手操作和动态扩展；分析 Worker 启动时显式预热完整目录，因此这项优化不等于完整服务启动速度提升同样倍数。
+
+`core/tools/_tool_index.py` 只存工具 ID 到模块的映射，不复制描述或参数 schema；由 `scripts/generate_tool_index.py` 静态读取装饰器生成，支持无源码的 pyc 部署。新增或移动工具后运行：
+
+```sh
+env/bin/python scripts/generate_tool_index.py
+env/bin/python scripts/generate_tool_index.py --check
+```
+
+线段划分逐个接收稳定端点，维护标准特征序列、末尾分型和起点以来的极值；包含合并只重新检查受影响的末尾三元组。缺口候选分别维护反向序列，候选失效后释放其状态。保留逐前缀的确认顺序、三笔重叠检查、末笔确认延迟与端点原始位置。此处是单次计算内部的增量更新，不是在不同请求之间持久化未确认线段，也不新增缠论规则。
+
+冻结的优化前算法位于 `tests/fixtures/chanlun_segments_reference.py`，仅供测试与基准使用。`test_chanlun_incremental.py` 比较固定种子的随机走势、上下行对称走势的每个前缀，并覆盖等价价格、包含合并及长期趋势的价格读取次数。不存在不依赖数据形态的线性复杂度承诺：多个缺口反向候选及相邻线段重叠观察区间仍可能重复处理部分端点。
+
+可复现合成基准：
+
+```sh
+USE_MONGODB_STORAGE=false env/bin/python scripts/benchmark_structure_runtime.py
+USE_MONGODB_STORAGE=false env/bin/python -m pytest tests/unit/test_tool_lazy_loading.py tests/unit/test_chanlun_incremental.py tests/unit/test_chanlun_segments.py -q
+```
+
+2026-10-20 本机 Python 3.10 测得：纯算法导入改动前单次约 3.63 秒，改动后三次中位数约 8.6 毫秒；趋势数据 1,000 个端点由 273.67 毫秒降至 1.32 毫秒，2,000 个端点由 1,117.97 毫秒降至 2.65 毫秒（算法均为三次中位数）。这些数字只衡量模块导入和合成数据计算，不包含真实行情网络耗时或 LLM 分析耗时。

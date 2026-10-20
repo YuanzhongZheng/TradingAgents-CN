@@ -48,22 +48,77 @@ def standard_features(strokes: Sequence, start: int) -> list[Feature]:
 
 
 def _turns(strokes: Sequence, start: int):
-    up = strokes[start][0] == "bottom"
-    features = standard_features(strokes, start)
-    for left, mid, right in zip(features, features[1:], features[2:]):
+    state = _FeatureSequence(strokes, start)
+    state.advance(len(strokes))
+    yield from state.turns.values()
+
+
+class _FeatureSequence:
+    """只更新末尾特征及受它影响的分型，已封闭的三元组保持不变。
+
+    每个序列保存从起点到各观察位置的极值，避免分型校验重复扫描价格。
+    缺口反向序列拥有独立状态；不借用未来端点来确认当前线段。
+    """
+
+    def __init__(self, strokes: Sequence, start: int):
+        self.strokes = strokes
+        self.start = start
+        self.up = strokes[start][0] == "bottom"
+        self.direction = 1 if self.up else -1
+        self.features: list[Feature] = []
+        self.extremes: list[float] = []
+        self.turns: dict[int, tuple[int, int, bool]] = {}
+        self.stop = start
+
+    def advance(self, stop: int):
+        for index in range(self.stop, stop):
+            price = _price(self.strokes[index])
+            extreme = price if not self.extremes else (
+                max(self.extremes[-1], price) if self.up else min(self.extremes[-1], price)
+            )
+            self.extremes.append(extreme)
+            if index >= self.start + 2 and (index - self.start) % 2 == 0:
+                self._append_feature(index - 1)
+        self.stop = stop
+
+    def _append_feature(self, index: int):
+        a, b = _price(self.strokes[index]), _price(self.strokes[index + 1])
+        item = Feature(min(a, b), max(a, b), index if a < b else index + 1,
+                       index if a > b else index + 1, index + 1)
+        if self.features:
+            prev = self.features[-1]
+            included = ((item.low >= prev.low and item.high <= prev.high)
+                        or (prev.low >= item.low and prev.high <= item.high))
+            if included:
+                high = max(prev.high, item.high) if self.direction > 0 else min(prev.high, item.high)
+                low = max(prev.low, item.low) if self.direction > 0 else min(prev.low, item.low)
+                self.features[-1] = Feature(
+                    low, high, prev.low_index if low == prev.low else item.low_index,
+                    prev.high_index if high == prev.high else item.high_index, item.observed,
+                )
+                self._update_tail_turn()
+                return
+            self.direction = 1 if item.high > prev.high else -1
+        self.features.append(item)
+        self._update_tail_turn()
+
+    def _update_tail_turn(self):
+        if len(self.features) < 3:
+            return
+        key = len(self.features) - 3
+        self.turns.pop(key, None)
+        left, mid, right = self.features[-3:]
         top = mid.high > max(left.high, right.high) and mid.low > max(left.low, right.low)
         bottom = mid.low < min(left.low, right.low) and mid.high < min(left.high, right.high)
-        if not (top if up else bottom):
-            continue
-        endpoint = mid.high_index if up else mid.low_index
-        if endpoint - start < 3:
-            continue
-        # A feature turn behind a more extreme point cannot terminate this segment.
-        prices = [_price(s) for s in strokes[start:right.observed + 1]]
-        if _price(strokes[endpoint]) != (max(prices) if up else min(prices)):
-            continue
-        gap = mid.low > left.high if up else mid.high < left.low
-        yield endpoint, right.observed, gap
+        if not (top if self.up else bottom):
+            return
+        endpoint = mid.high_index if self.up else mid.low_index
+        if endpoint - self.start < 3:
+            return
+        if _price(self.strokes[endpoint]) != self.extremes[right.observed - self.start]:
+            return
+        gap = mid.low > left.high if self.up else mid.high < left.low
+        self.turns[key] = (endpoint, right.observed, gap)
 
 
 def _initial_overlap(strokes: Sequence, start: int) -> bool:
@@ -102,27 +157,36 @@ def chanlun_segments(strokes: Sequence, *, last_endpoint_confirmed: bool = False
     while start + 3 < len(stable):
         found = None
         pending = None
-        for stop in range(start + 4, len(stable) + 1):
-            prefix = stable[:stop]
+        forward = _FeatureSequence(stable, start)
+        reverse_states = {}
+        stops = range(start + 4, len(stable) + 1) if _initial_overlap(stable, start) else ()
+        for stop in stops:
+            forward.advance(stop)
             pending = None
-            for end, observed, gap in _turns(prefix, start):
-                if not _initial_overlap(prefix, start):
-                    continue
+            active_reverse = set()
+            for end, observed, gap in forward.turns.values():
                 if gap:
-                    up = prefix[start][0] == "bottom"
-                    prices = [_price(s) for s in prefix[start:]]
-                    if _price(prefix[end]) != (max(prices) if up else min(prices)):
+                    if _price(stable[end]) != forward.extremes[-1]:
                         continue
+                    active_reverse.add(end)
                     # Second feature fractal confirms case 2 regardless of its own gap.
-                    reverse = next(_turns(prefix, end), None)
+                    if end not in reverse_states:
+                        reverse_states[end] = _FeatureSequence(stable, end)
+                    reverse_state = reverse_states[end]
+                    reverse_state.advance(stop)
+                    reverse = next(iter(reverse_state.turns.values()), None)
                     if reverse is None:
-                        pending = _record(prefix, start, end, observed, True, "candidate")
+                        pending = _record(stable, start, end, observed, True, "candidate")
                         continue
                     observed = max(observed, reverse[1])
-                found = _record(prefix, start, end, observed, gap, "confirmed")
+                found = _record(stable, start, end, observed, gap, "confirmed")
                 break
             if found:
                 break
+            # 已被新极值或包含合并作废的候选不再保留整份反向历史。
+            for end in list(reverse_states):
+                if end not in active_reverse:
+                    del reverse_states[end]
         if found is None:
             if pending is None:
                 up = stable[start][0] == "bottom"

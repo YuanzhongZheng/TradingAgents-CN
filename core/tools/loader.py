@@ -121,7 +121,22 @@ class ToolLoader:
         Returns:
             是否加载成功
         """
-        # 尝试从各个类别目录查找
+        # 一个模块可以注册多个工具，文件名不一定与工具 ID 一致。
+        from ._tool_index import TOOL_MODULES
+        module_name = TOOL_MODULES.get(tool_id)
+        if module_name and self.tools_dir.resolve() == Path(__file__).with_name("implementations").resolve():
+            try:
+                # importlib 自身的模块锁保证并发调用等待装饰器注册完成。
+                importlib.import_module(module_name)
+                self._loaded_modules.add(module_name)
+                return True
+            except Exception as exc:
+                logger.warning("加载工具失败 %s: %s", tool_id, exc)
+                return False
+
+        if not self.tools_dir.exists():
+            return False
+        # 非内置目录保留原有动态查找路径。
         for category_dir in self.tools_dir.iterdir():
             if not category_dir.is_dir():
                 continue
@@ -172,13 +187,8 @@ class ToolLoader:
         if module_name in self._loaded_modules:
             return
 
-        # 避免与 __init__.py 的显式 import 冲突：如果模块已由其它路径加载
-        # （如 __init__.py 的 from .xxx import ...），直接复用，不再二次导入
-        if module_name in sys.modules:
-            self._loaded_modules.add(module_name)
-            return
-
-        # 导入模块
+        # 即使存在于 sys.modules，也通过 importlib 等待其他线程完成模块初始化。
+        # 普通已完成导入不会重复执行模块。
         try:
             importlib.import_module(module_name)
         except RecursionError:

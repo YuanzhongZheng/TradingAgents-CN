@@ -52,50 +52,68 @@ class ToolRegistry:
         return cls._instance
     
     def __init__(self):
-        if not self._initialized:
+        with self._lock:
+            if self._initialized:
+                return
             self._tools: Dict[str, ToolMetadata] = {}
             self._functions: Dict[str, Callable] = {}  # 存储实际函数实现
+            self._discovery_lock = threading.RLock()
+            self._discovered = False
+            self._discovering = False
+            self._disabled = set()
             self._load_builtin_tools()
-            # ⚠️ 先标记已初始化，再加载工具模块。
-            # 否则 load_all() 导入模块时，模块的 @register_tool 装饰器会触发
-            # ToolRegistry() → __init__ → _initialized 还是 False → 重新进入
-            # load_all() → 无界递归（RecursionError）。
             self._initialized = True
-            self._load_tool_implementations()  # 自动加载工具实现
 
     def _load_builtin_tools(self) -> None:
         """加载内置工具元数据"""
         for tool_id, metadata in BUILTIN_TOOLS.items():
-            self._tools[tool_id] = metadata
+            self._tools[tool_id] = metadata.model_copy(deep=True)
 
     def _load_tool_implementations(self) -> None:
-        """加载工具函数实现"""
-        try:
-            from .loader import ToolLoader
-            loader = ToolLoader()
-            count = loader.load_all()
-            logger.info(f"✅ 自动加载了 {count} 个工具模块")
-        except Exception as e:
-            logger.warning(f"⚠️ 自动加载工具模块失败: {e}")
+        """显式全量发现；定向查询不经过此路径。"""
+        with self._discovery_lock:
+            if self._discovered or self._discovering:
+                return
+            self._discovering = True
+            try:
+                from .loader import get_tool_loader
+                get_tool_loader().load_all()
+                self._discovered = True
+            finally:
+                self._discovering = False
+
+    def _ensure_tool(self, tool_id: str) -> None:
+        if tool_id in self._disabled or tool_id in self._functions:
+            return
+        from ._tool_index import TOOL_MODULES
+        if tool_id in TOOL_MODULES:
+            from .loader import get_tool_loader
+            get_tool_loader().load_tool(tool_id)
+        elif tool_id not in self._tools:
+            # 保留动态扩展工具的发现能力，未知 ID 仅首次触发全量扫描。
+            self._load_tool_implementations()
     
     def register(self, metadata: ToolMetadata, override: bool = False) -> None:
         """注册工具"""
         if metadata.id in self._tools and not override:
             raise ValueError(f"工具 '{metadata.id}' 已注册，使用 override=True 覆盖")
         self._tools[metadata.id] = metadata
+        self._disabled.discard(metadata.id)
     
     def unregister(self, tool_id: str) -> None:
         """注销工具"""
         self._tools.pop(tool_id, None)
         self._functions.pop(tool_id, None)
+        self._disabled.add(tool_id)
     
     def get(self, tool_id: str) -> Optional[ToolMetadata]:
         """获取工具元数据"""
+        self._ensure_tool(tool_id)
         return self._tools.get(tool_id)
 
     def has_tool(self, tool_id: str) -> bool:
         """检查工具是否已注册"""
-        return tool_id in self._tools
+        return self.get(tool_id) is not None
 
     def get_tool(self, tool_id: str) -> Optional[ToolMetadata]:
         """获取工具元数据（别名方法）"""
@@ -107,23 +125,24 @@ class ToolRegistry:
 
     def list_all(self) -> List[ToolMetadata]:
         """列出所有工具"""
+        self._load_tool_implementations()
         return list(self._tools.values())
     
     def get_by_category(self, category: str) -> List[ToolMetadata]:
         """按类别获取工具"""
-        return [t for t in self._tools.values() if t.category == category]
+        return [t for t in self.list_all() if t.category == category]
     
     def get_by_ids(self, tool_ids: List[str]) -> List[ToolMetadata]:
         """根据 ID 列表获取工具"""
-        return [self._tools[tid] for tid in tool_ids if tid in self._tools]
+        return [tool for tid in tool_ids if (tool := self.get(tid)) is not None]
     
     def get_online_tools(self) -> List[ToolMetadata]:
         """获取所有在线工具"""
-        return [t for t in self._tools.values() if t.is_online]
+        return [t for t in self.list_all() if t.is_online]
     
     def get_offline_tools(self) -> List[ToolMetadata]:
         """获取所有离线工具"""
-        return [t for t in self._tools.values() if not t.is_online]
+        return [t for t in self.list_all() if not t.is_online]
 
     # ==================== 函数注册（新增） ====================
 
@@ -139,6 +158,7 @@ class ToolRegistry:
         override: bool = False,
         parameters: Optional[List] = None,
         timeout_tier: str = "",
+        _auto_discovered: bool = False,
         **kwargs
     ) -> None:
         """
@@ -162,6 +182,10 @@ class ToolRegistry:
         if sanitized != tool_id:
             logger.warning(f"⚠️ tool_id '{tool_id}' 含非法字符，已规范化为 '{sanitized}'")
             tool_id = sanitized
+        # 延迟装饰器不能复活已注销工具；显式注册仍可重新启用它。
+        if tool_id in self._disabled and _auto_discovered and not override:
+            return
+        self._disabled.discard(tool_id)
 
         if tool_id in self._tools:
             if tool_id not in self._functions:
@@ -208,6 +232,7 @@ class ToolRegistry:
 
     def get_function(self, tool_id: str) -> Optional[Callable]:
         """获取工具的函数实现"""
+        self._ensure_tool(tool_id)
         return self._functions.get(tool_id)
 
     def _build_langchain_args_schema(self, metadata: ToolMetadata) -> Optional[Type]:
@@ -240,10 +265,10 @@ class ToolRegistry:
         Returns:
             LangChain Tool 对象，如果工具未注册或无函数实现则返回 None
         """
+        func = self.get_function(tool_id)
         if tool_id not in self._tools:
             return None
 
-        func = self._functions.get(tool_id)
         if func is None:
             return None
 
