@@ -371,18 +371,18 @@ class DataSourceManager:
             if self._configured_enabled_map.get(adapter.name) is False:
                 continue
             try:
-                if not adapter.is_available():
-                    continue
-                request_timeout()
+                arguments = dict(code=code, period=period, limit=limit, adj=adj,
+                                 start_date=start_date, end_date=end_date)
                 logger.info(f"Trying to fetch kline from {adapter.name}")
-                items = adapter.get_kline(
-                    code=code,
-                    period=period,
-                    limit=limit,
-                    adj=adj,
-                    start_date=start_date,
-                    end_date=end_date,
-                )
+                if adapter.name in {"qmt", "baostock"}:
+                    # Availability probes can hang too: run them inside the worker.
+                    from core.market_runtime.isolated_providers import get_isolated_kline
+                    items = get_isolated_kline(adapter.name, arguments)
+                else:
+                    if not adapter.is_available():
+                        continue
+                    request_timeout()
+                    items = adapter.get_kline(**arguments)
                 if start_date or end_date:
                     items = _items_within_dates(items, start_date, end_date)
                 if items:

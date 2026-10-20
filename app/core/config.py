@@ -326,6 +326,7 @@ class Settings(BaseSettings):
     MARKET_ANALYST_LOOKBACK_DAYS: int = Field(default=60, ge=5, le=365, description="市场分析回溯天数（用于技术分析）")
 
     MARKET_STRUCTURE_TIMEOUT_SECONDS: float = Field(default=20, ge=0.1, le=300, description="结构分析及统一行情工具的总等待秒数")
+    MARKET_QMT_DOWNLOAD_TIMEOUT_SECONDS: float = Field(default=60, ge=1, le=300, description="独立 QMT 历史下载进程的总时间预算")
     MARKET_PROVIDER_TIMEOUT_SECONDS: float = Field(default=8, ge=0.1, le=120, description="行情 HTTP 单次连接/读取超时秒数")
 
     # ==================== BaoStock统一数据同步配置 ====================

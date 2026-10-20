@@ -357,12 +357,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Startup backfill failed (ignored): {e}")
 
+    from core.market_runtime.isolated_providers import start_isolated_providers, stop_isolated_providers
+    start_isolated_providers()
+
     # 启动每日定时任务：可配置
     scheduler = await start_builtin_scheduler(logger)
 
     try:
         yield
     finally:
+        # Stop isolated SDK calls before waiting for analysis/sync threads.
+        try:
+            await asyncio.to_thread(stop_isolated_providers)
+        except Exception as e:
+            logger.warning(f"行情隔离进程关闭错误: {e}")
+
         # 关闭时清理
 
         # 🔥 关闭统一线程池同步服务

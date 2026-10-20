@@ -585,24 +585,22 @@ class QMTAdapter(DataSourceAdapter):
         else:
             self._sector_data_prepared = True
 
-    def _download_history_if_needed(self, xt_code: str, xt_period: str) -> None:
+    def _download_history_if_needed(self, xt_code: str, xt_period: str) -> bool:
         if not self._parse_bool(self._get_runtime_setting("QMT_AUTO_DOWNLOAD_HISTORY", True)):
-            return
-
+            return False
         xt = _get_xtdata()
         if xt is None:
-            return
-
+            return False
         start_time = str(self._get_runtime_setting("QMT_HISTORY_START_TIME", "") or "")
         try:
-            xt.download_history_data(xt_code, period=xt_period, start_time=start_time, incrementally=True)
-        except TypeError:
             try:
+                xt.download_history_data(xt_code, period=xt_period, start_time=start_time, incrementally=True)
+            except TypeError:
                 xt.download_history_data(xt_code, period=xt_period, start_time=start_time)
-            except Exception as e:
-                logger.debug(f"QMT: 自动下载历史数据失败 {xt_code}: {e}")
+            return True
         except Exception as e:
             logger.debug(f"QMT: 自动下载历史数据失败 {xt_code}: {e}")
+            return False
 
     def _download_financial_if_needed(self, code: str, table_list: Optional[List[str]], start_time: str, end_time: str) -> None:
         if not self._parse_bool(self._get_runtime_setting("QMT_AUTO_DOWNLOAD_FINANCIAL", False)):
@@ -1011,6 +1009,7 @@ class QMTAdapter(DataSourceAdapter):
         adj: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        download_history: bool = True,
     ) -> Optional[List[Dict[str, Any]]]:
         """获取 K 线数据
 
@@ -1041,7 +1040,8 @@ class QMTAdapter(DataSourceAdapter):
             }
             xt_period = period_map.get(period, "1d")
 
-            self._download_history_if_needed(xt_code, xt_period)
+            if download_history:
+                self._download_history_if_needed(xt_code, xt_period)
 
             # 根据官方文档，使用 get_market_data_ex 接口
             # 传入空的 field_list 表示获取所有字段
