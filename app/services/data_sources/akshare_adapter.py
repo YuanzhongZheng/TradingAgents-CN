@@ -426,6 +426,7 @@ class AKShareAdapter(DataSourceAdapter):
             return None
         try:
             import akshare as ak
+            from core.market_runtime.transport import call_with_http_budget
             code6 = str(code).zfill(6)
             if period in ("day", "week", "month"):
                 period_map = {"day": "daily", "week": "weekly", "month": "monthly"}
@@ -445,7 +446,7 @@ class AKShareAdapter(DataSourceAdapter):
                 fetchers = [
                     (
                         "eastmoney",
-                        lambda: ak.stock_zh_a_hist(
+                        lambda: call_with_http_budget(ak.stock_zh_a_hist,
                             symbol=code6,
                             period=period_map[period],
                             start_date=start_compact,
@@ -456,7 +457,7 @@ class AKShareAdapter(DataSourceAdapter):
                     ),
                     (
                         "sina",
-                        lambda: ak.stock_zh_a_daily(
+                        lambda: call_with_http_budget(ak.stock_zh_a_daily,
                             symbol=symbol,
                             start_date=start_compact,
                             end_date=end_compact,
@@ -466,7 +467,7 @@ class AKShareAdapter(DataSourceAdapter):
                     ),
                     (
                         "tencent",
-                        lambda: ak.stock_zh_a_hist_tx(
+                        lambda: call_with_http_budget(ak.stock_zh_a_hist_tx,
                             symbol=symbol,
                             start_date=start_compact,
                             end_date=end_compact,
@@ -496,7 +497,7 @@ class AKShareAdapter(DataSourceAdapter):
                 per_map = {"5m": "5", "15m": "15", "30m": "30", "60m": "60"}
                 if period not in per_map:
                     return None
-                df = ak.stock_zh_a_minute(symbol=code6, period=per_map[period], adjust=adj if adj in ("qfq", "hfq") else "")
+                df = call_with_http_budget(ak.stock_zh_a_minute, symbol=self._get_akshare_cn_symbol(code6), period=per_map[period], adjust=adj if adj in ("qfq", "hfq") else "")
                 if df is None or getattr(df, 'empty', True):
                     return None
                 return self._build_kline_items(df, period, limit)

@@ -246,6 +246,10 @@ class BaoStockAdapter(DataSourceAdapter):
         end_date: Optional[str] = None,
     ):
         """按日期区间读取 BaoStock K 线。未给区间时保持原行为，交给其他数据源。"""
+        # This adapter only implements daily/weekly/monthly fields. Never relabel
+        # daily bars as intraday bars when other minute providers fail.
+        if period not in {"day", "week", "month"}:
+            return None
         if not self.is_available() or not start_date or not end_date:
             return None
         start_iso = iso_date(start_date)

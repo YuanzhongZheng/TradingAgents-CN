@@ -314,6 +314,11 @@ def test_historical_request_drops_future_bars_on_every_period(monkeypatch):
     calls = []
 
     class FakeManager:
+        def read_historical_bars(self, symbol, start, end, period):
+            import pandas as pd
+            items, source = self.get_kline_with_fallback(symbol, "day", PERIOD_LIMITS["day"], "qfq", start, end)
+            return pd.DataFrame(items), source
+
         def get_kline_with_fallback(self, code, period="day", limit=120, adj=None, start_date=None, end_date=None):
             calls.append({
                 "period": period,
@@ -329,7 +334,7 @@ def test_historical_request_drops_future_bars_on_every_period(monkeypatch):
                 "close": 10,
             }], "fake")
 
-    monkeypatch.setattr("app.services.data_sources.manager.DataSourceManager", lambda: FakeManager())
+    monkeypatch.setattr("app.services.data_sources.manager.get_app_data_source_manager", lambda: FakeManager())
     clear_structure_cache()
     result = analyze_price_structure(
         "000001",

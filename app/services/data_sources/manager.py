@@ -4,7 +4,11 @@ Data source manager that orchestrates multiple adapters with priority and option
 from typing import List, Optional, Tuple, Dict
 import logging
 import time
+import threading
+from core.market_runtime.cache import SingleFlightCache
+from core.market_runtime.context import configuration_key, current_snapshot, request_timeout, normalize_date
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .base import DataSourceAdapter
@@ -29,6 +33,7 @@ class DataSourceManager:
     """
 
     def __init__(self):
+        self._history_cache = SingleFlightCache(maxsize=128)
         self._configured_enabled_map: Dict[str, bool] = {}
         self.adapters: List[DataSourceAdapter] = [
             LocalAdapter(),      # 本地数据源（用户通过API导入）
@@ -360,9 +365,15 @@ class DataSourceManager:
 
         给出日期区间时，只接受区间内的 K 线；区间外的数据会换下一个数据源。
         """
-        available_adapters = self.get_available_adapters()
-        for adapter in available_adapters:
+        # Probe only the adapter being attempted; do not wait for every provider.
+        for adapter in self.adapters:
+            request_timeout()
+            if self._configured_enabled_map.get(adapter.name) is False:
+                continue
             try:
+                if not adapter.is_available():
+                    continue
+                request_timeout()
                 logger.info(f"Trying to fetch kline from {adapter.name}")
                 items = adapter.get_kline(
                     code=code,
@@ -422,7 +433,27 @@ class DataSourceManager:
                 continue
         return None, None
 
-    def read_historical_bars(
+    def read_historical_bars(self, symbol, start_date=None, end_date=None, period="daily", cache_reader=None):
+        start_date, end_date = normalize_date(start_date) or None, normalize_date(end_date) or None
+        period = {"day": "daily", "week": "weekly", "month": "monthly"}.get(period, period)
+        snapshot = current_snapshot()
+
+        def read(start, end, selected_period):
+            def load():
+                return self._read_historical_bars_uncached(symbol, start, end, selected_period, cache_reader)
+            cache = getattr(self, "_history_cache", None)
+            if cache is None or cache_reader is not None:
+                return load()
+            return cache.get_or_load(
+                (configuration_key(), _normalize_symbol(symbol), start, end, selected_period, ANALYSIS_BAR_ADJUST),
+                load, cacheable=lambda value: value[0] is not None and not value[0].empty,
+                timeout=request_timeout(),
+            )
+        if snapshot is not None:
+            return snapshot.history(symbol, start_date, end_date, period, read)
+        return read(start_date, end_date, period)
+
+    def _read_historical_bars_uncached(
         self,
         symbol: str,
         start_date: Optional[str] = None,
@@ -441,26 +472,37 @@ class DataSourceManager:
         except Exception as exc:
             logger.warning("读取行情缓存失败，改为按适配器拉取: %s", exc)
             cached = None
-        if cached is not None and not getattr(cached, "empty", True):
+        cached = _filter_frame_by_dates(cached, start_date, end_date)
+        has_cached = cached is not None and not cached.empty
+        if has_cached and (cache_reader is not None or _history_reaches_end(cached, end_date, period)):
             return cached, "mongodb"
 
-        items, source = self.get_kline_with_fallback(
-            code=_normalize_symbol(symbol),
-            period=_kline_period(period),
-            limit=_history_bar_limit(start_date, end_date, period),
-            adj=ANALYSIS_BAR_ADJUST,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        try:
+            items, source = self.get_kline_with_fallback(
+                code=_normalize_symbol(symbol),
+                period=_kline_period(period),
+                limit=_history_bar_limit(start_date, end_date, period),
+                adj=ANALYSIS_BAR_ADJUST,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except TimeoutError:
+            if has_cached:
+                return cached, "mongodb"
+            raise
         if not items or not source:
-            return None, None
+            return (cached, "mongodb") if has_cached else (None, None)
 
         frame = _normalize_bar_units(
             _filter_frame_by_dates(_bars_to_frame(items), start_date, end_date),
             source,
         )
         if frame is None or frame.empty:
-            return None, None
+            return (cached, "mongodb") if has_cached else (None, None)
+        if has_cached:
+            cached_day, loaded_day = _latest_history_day(cached), _latest_history_day(frame)
+            if cached_day and (loaded_day is None or loaded_day < cached_day):
+                return cached, "mongodb"
         self._write_historical_bars(symbol, frame, source, period)
         return frame, source
 
@@ -528,6 +570,32 @@ def _history_bar_limit(start_date: Optional[str], end_date: Optional[str], perio
     if period == "monthly":
         return min(max(days // 28 + 3, 12), 600)
     return min(max(int(days * 0.75) + 10, 30), 4000)
+
+
+def _history_reaches_end(frame, end_date, period):
+    """Check daily freshness before freezing; calendar holidays may trigger a refresh.
+
+    Failed refreshes retain dated cached data. No JIT job runs after a snapshot is
+    frozen, so the report and structure cannot see different revisions.
+    """
+    if not end_date or period not in {"day", "daily"}:
+        return True
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    target = min(pd.Timestamp(end_date).date(), now.date())
+    if target == now.date() and now.hour < 16:
+        target -= timedelta(days=1)
+    while target.weekday() >= 5:
+        target -= timedelta(days=1)
+    latest = _latest_history_day(frame)
+    return latest is not None and latest >= target
+
+
+def _latest_history_day(frame):
+    column = next((name for name in ("date", "trade_date", "time") if name in frame.columns), None)
+    if column is None:
+        return None
+    dates = pd.to_datetime(frame[column], errors="coerce").dropna()
+    return dates.max().date() if not dates.empty else None
 
 
 def _kline_period(period: str) -> str:
@@ -598,11 +666,19 @@ def _read_mongo_history(symbol: str, start_date: Optional[str], end_date: Option
 
 
 _app_data_source_manager = None
+_app_manager_lock = threading.Lock()
+_app_manager_key = None
+_app_manager_created = 0.0
 
 
 def get_app_data_source_manager() -> DataSourceManager:
-    """同步任务和分析读取共用的数据源管理器。"""
-    global _app_data_source_manager
-    if _app_data_source_manager is None:
-        _app_data_source_manager = DataSourceManager()
-    return _app_data_source_manager
+    """Reuse adapters; refresh after config changes or the config's five-minute TTL."""
+    global _app_data_source_manager, _app_manager_key, _app_manager_created
+    with _app_manager_lock:
+        key = configuration_key()
+        if (_app_data_source_manager is None or key != _app_manager_key
+                or time.monotonic() - _app_manager_created >= 300):
+            _app_data_source_manager = DataSourceManager()
+            _app_manager_key = configuration_key()
+            _app_manager_created = time.monotonic()
+        return _app_data_source_manager

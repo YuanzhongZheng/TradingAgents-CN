@@ -8,15 +8,19 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from concurrent.futures import wait
 from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Annotated, Dict, List, Optional, Sequence, Tuple
 
 from langchain_core.tools import tool
 
+from core.market_runtime.cache import SingleFlightCache, MARKET_IO_POOL, BusyError
+from core.market_runtime.context import (
+    cache_namespace, current_snapshot, normalize_symbol, normalize_date,
+    request_deadline, market_wait_budget,
+)
 from core.tools.base import register_tool
 
 from .chanlun import analyze_chanlun_bars, render_chanlun
@@ -24,10 +28,8 @@ from .elliott_wave import analyze_elliott_bars, render_elliott
 from .structure_bars import StructureBar, bars_from_records, direction_label
 
 logger = logging.getLogger(__name__)
-_STRUCTURE_CACHE_TTL_SECONDS = 180
-_STRUCTURE_CACHE: Dict[tuple, tuple] = {}
-_STRUCTURE_LOCKS: Dict[tuple, threading.Lock] = {}
-_STRUCTURE_CACHE_GUARD = threading.Lock()
+_STRUCTURE_CACHE = SingleFlightCache(maxsize=256)
+_STRUCTURE_POOL = MARKET_IO_POOL
 
 DEFAULT_STRUCTURE_PERIODS: Tuple[str, ...] = ("week", "day", "30m", "5m")
 PERIOD_LABELS = {
@@ -131,18 +133,23 @@ def clip_structure_bars(
 
 
 def load_structure_bars(symbol: str, period: str, end_date: Optional[str] = None) -> Tuple[List[StructureBar], str, str]:
-    from app.services.data_sources.manager import ANALYSIS_BAR_ADJUST, DataSourceManager
+    from app.services.data_sources.manager import ANALYSIS_BAR_ADJUST, get_app_data_source_manager
 
-    manager = DataSourceManager()
+    snapshot = current_snapshot()
+    manager = snapshot.get_manager() if snapshot else get_app_data_source_manager()
     start_date, bounded_end, limit = structure_request_window(period, end_date)
-    items, source = manager.get_kline_with_fallback(
-        code=symbol,
-        period=period,
-        limit=limit,
-        adj=ANALYSIS_BAR_ADJUST,
-        start_date=start_date,
-        end_date=bounded_end,
-    )
+    if period == "day":
+        frame, source = manager.read_historical_bars(symbol, start_date, bounded_end, "daily")
+        items = frame.to_dict("records") if frame is not None else []
+    else:
+        items, source = manager.get_kline_with_fallback(
+            code=symbol,
+            period=period,
+            limit=limit,
+            adj=ANALYSIS_BAR_ADJUST,
+            start_date=start_date,
+            end_date=bounded_end,
+        )
     bars, availability = clip_structure_bars(bars_from_records(items or []), start_date, bounded_end, limit)
     return bars, source or "", availability
 
@@ -153,69 +160,38 @@ def _load_period(symbol: str, period: str, end_date: Optional[str]) -> Tuple[str
         return period, bars, source, "", availability
     except Exception as exc:
         logger.warning("结构分析读取 %s %s 失败: %s", symbol, period, exc)
-        return period, [], "", str(exc), "error"
+        return period, [], "", str(exc) or type(exc).__name__, "error"
 
 
 def _unavailable_result() -> Dict[str, object]:
     return {"status": "unavailable", "bar_count": 0}
 
 
-def _structure_cache_lock(key: tuple) -> threading.Lock:
-    with _STRUCTURE_CACHE_GUARD:
-        lock = _STRUCTURE_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _STRUCTURE_LOCKS[key] = lock
-        return lock
-
-
-def _cached_structure(key: tuple):
-    item = _STRUCTURE_CACHE.get(key)
-    if item is None:
-        return None
-    stored_at, value = item
-    if time.monotonic() - stored_at > _STRUCTURE_CACHE_TTL_SECONDS:
-        _STRUCTURE_CACHE.pop(key, None)
-        return None
-    return value
-
-
-def _store_structure(key: tuple, value) -> None:
-    if len(_STRUCTURE_CACHE) > 64:
-        oldest = min(_STRUCTURE_CACHE, key=lambda item: _STRUCTURE_CACHE[item][0])
-        _STRUCTURE_CACHE.pop(oldest, None)
-    _STRUCTURE_CACHE[key] = (time.monotonic(), value)
-
-
 def clear_structure_cache() -> None:
-    with _STRUCTURE_CACHE_GUARD:
-        _STRUCTURE_CACHE.clear()
+    _STRUCTURE_CACHE.clear()
 
 
-def _analyze_price_structure_uncached(
-    symbol: str,
-    end_date: Optional[str],
-    selected: Sequence[str],
-) -> Dict[str, Dict[str, object]]:
-    with ThreadPoolExecutor(max_workers=min(4, len(selected) or 1)) as pool:
-        loaded = list(pool.map(lambda period: _load_period(symbol, period, end_date), selected))
-    output = {}
-    for period, bars, source, error, availability in loaded:
-        if availability == "unavailable":
-            output[period] = {
-                "source": source,
-                "error": error,
-                "chanlun": _unavailable_result(),
-                "elliott": _unavailable_result(),
-            }
-            continue
-        output[period] = {
-            "source": source,
-            "error": error,
-            "chanlun": analyze_chanlun_bars(bars),
-            "elliott": analyze_elliott_bars(bars, PERIOD_SWING.get(period, 0.05)),
-        }
-    return output
+def _analyze_period(symbol, period, end_date):
+    _, bars, source, error, availability = _load_period(symbol, period, end_date)
+    if availability != "ok":
+        return {"source": source, "error": error, "chanlun": _unavailable_result(),
+                "elliott": _unavailable_result()}
+    return {"source": source, "error": "", "chanlun": analyze_chanlun_bars(bars),
+            "elliott": analyze_elliott_bars(bars, PERIOD_SWING.get(period, 0.05))}
+
+
+def _period_future(namespace, symbol, period, end_date):
+    return _STRUCTURE_CACHE.submit(
+        _STRUCTURE_POOL,
+        (namespace, symbol, end_date, period, "qfq"),
+        lambda: _analyze_period(symbol, period, end_date),
+        cacheable=lambda result: not result["error"] and result["chanlun"]["status"] != "unavailable",
+    )
+
+
+def _failed_period(message):
+    return {"source": "", "error": message, "chanlun": _unavailable_result(),
+            "elliott": _unavailable_result()}
 
 
 def analyze_price_structure(
@@ -223,18 +199,28 @@ def analyze_price_structure(
     end_date: Optional[str] = None,
     periods: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, object]]:
-    selected = tuple(periods or DEFAULT_STRUCTURE_PERIODS)
-    key = (symbol, end_date or "", selected)
-    cached = _cached_structure(key)
-    if cached is not None:
-        return cached
-    with _structure_cache_lock(key):
-        cached = _cached_structure(key)
-        if cached is not None:
-            return cached
-        result = _analyze_price_structure_uncached(symbol, end_date, selected)
-        _store_structure(key, result)
-        return result
+    selected = tuple(dict.fromkeys(periods or DEFAULT_STRUCTURE_PERIODS))
+    symbol, end_date = normalize_symbol(symbol), normalize_date(end_date) or None
+    namespace = cache_namespace()
+    budget = market_wait_budget()
+    output, futures = {}, {}
+    with request_deadline(budget):
+        for period in selected:
+            try:
+                futures[period] = _period_future(namespace, symbol, period, end_date)
+            except BusyError as exc:
+                output[period] = _failed_period(str(exc))
+        if futures:
+            done, _ = wait(futures.values(), timeout=budget)
+            for period, future in futures.items():
+                if future not in done:
+                    output[period] = _failed_period(f"取数超过 {budget:g} 秒，本周期暂不可用")
+                else:
+                    try:
+                        output[period] = deepcopy(future.result())
+                    except Exception as exc:
+                        output[period] = _failed_period(str(exc))
+    return {period: output[period] for period in selected}
 
 
 def render_cross_period(results: Dict[str, Dict[str, object]]) -> str:

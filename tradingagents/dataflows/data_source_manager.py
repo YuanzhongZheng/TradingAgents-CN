@@ -1181,7 +1181,10 @@ class DataSourceManager:
         """通过同步适配器管理器读取行情，保证分析和同步使用同一优先级。"""
         from app.services.data_sources.manager import get_app_data_source_manager
 
-        frame, source = get_app_data_source_manager().read_historical_bars(
+        from core.market_runtime.context import current_snapshot
+        snapshot = current_snapshot()
+        manager = snapshot.get_manager() if snapshot else get_app_data_source_manager()
+        frame, source = manager.read_historical_bars(
             symbol, start_date, end_date, period
         )
         if frame is None or getattr(frame, "empty", True):

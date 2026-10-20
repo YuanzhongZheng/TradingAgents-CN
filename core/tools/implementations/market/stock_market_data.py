@@ -9,8 +9,6 @@ import concurrent.futures
 import json
 import logging
 import re
-import threading
-import time
 from datetime import datetime
 from typing import Annotated, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -18,46 +16,19 @@ from langchain_core.tools import tool
 
 from core.tools.base import register_tool
 
+from core.market_runtime.cache import SingleFlightCache, MARKET_IO_POOL
+from core.market_runtime.context import (
+    cache_namespace, current_snapshot, normalize_date, normalize_symbol,
+    request_deadline, market_wait_budget,
+)
+
 logger = logging.getLogger(__name__)
 _CHINA_TZ = ZoneInfo("Asia/Shanghai")
-_MARKET_RESULT_TTL_SECONDS = 180
-_MARKET_RESULT_CACHE: dict[tuple[str, str, str], tuple[float, str]] = {}
-_MARKET_RESULT_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
-_MARKET_CACHE_GUARD = threading.Lock()
+_MARKET_RESULT_CACHE = SingleFlightCache()
 
 
-def _market_cache_key(ticker: str, start_date: str, end_date: str) -> tuple[str, str, str]:
-    normalized = re.sub(r"\.(SZ|SH|BJ|sz|sh|bj)$", "", (ticker or "").strip())
-    return (normalized, start_date or "", end_date or "")
-
-
-def _market_cache_lock(key: tuple[str, str, str]) -> threading.Lock:
-    with _MARKET_CACHE_GUARD:
-        lock = _MARKET_RESULT_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _MARKET_RESULT_LOCKS[key] = lock
-        return lock
-
-
-def _cached_market_result(key: tuple[str, str, str]) -> Optional[str]:
-    item = _MARKET_RESULT_CACHE.get(key)
-    if item is None:
-        return None
-    stored_at, value = item
-    if time.monotonic() - stored_at > _MARKET_RESULT_TTL_SECONDS:
-        _MARKET_RESULT_CACHE.pop(key, None)
-        return None
-    return value
-
-
-def _store_market_result(key: tuple[str, str, str], value: str) -> None:
-    if not value or value.startswith("统一市场数据工具执行失败"):
-        return
-    if len(_MARKET_RESULT_CACHE) > 64:
-        oldest = min(_MARKET_RESULT_CACHE, key=lambda item: _MARKET_RESULT_CACHE[item][0])
-        _MARKET_RESULT_CACHE.pop(oldest, None)
-    _MARKET_RESULT_CACHE[key] = (time.monotonic(), value)
+def _market_cache_key(ticker, start_date, end_date):
+    return (cache_namespace(), normalize_symbol(ticker), normalize_date(start_date), normalize_date(end_date))
 
 
 def _get_china_now() -> datetime:
@@ -367,15 +338,18 @@ def _load_unified_market_data(
             # 若陈旧，则在独立线程中异步拉取最新行情并写入 MongoDB，
             # 之后 get_china_stock_data_unified 就能读到最新数据。
             try:
-                _ensure_fresh_china_data(ticker)
+                if current_snapshot() is None:
+                    _ensure_fresh_china_data(ticker)
             except Exception as _jit_err:
                 logger.warning(f"⚠️ [JIT-Tool] 新鲜度检查出现异常（不影响分析）: {_jit_err}")
             # ============================================================
 
             try:
+                snapshot = current_snapshot()
+                snapshot_date = snapshot.latest_daily_date(ticker) if snapshot else None
+                date_args = {"db_latest_trade_date": snapshot_date} if snapshot_date else {}
                 effective_end_date, actual_data_date, date_note = _resolve_china_actual_data_date(
-                    ticker,
-                    requested_end_date,
+                    ticker, requested_end_date, **date_args,
                 )
                 if requested_start_date == requested_end_date:
                     effective_start_date = effective_end_date
@@ -500,17 +474,15 @@ def get_stock_market_data_unified(
         系统会自动获取 2024-11-09 到 2025-11-09 的365天历史数据
     """
     key = _market_cache_key(ticker, start_date, end_date)
-    cached = _cached_market_result(key)
-    if cached is not None:
-        logger.info("📈 [统一市场工具] 命中短时缓存: %s %s~%s", key[0], key[1], key[2])
-        return cached
-
-    with _market_cache_lock(key):
-        cached = _cached_market_result(key)
-        if cached is not None:
-            logger.info("📈 [统一市场工具] 等待后命中短时缓存: %s", key[0])
-            return cached
-        result = _load_unified_market_data(ticker, start_date, end_date)
-        _store_market_result(key, result)
-        return result
-
+    budget = market_wait_budget()
+    with request_deadline(budget):
+        future = _MARKET_RESULT_CACHE.submit(
+            MARKET_IO_POOL, key, lambda: _load_unified_market_data(ticker, start_date, end_date),
+            cacheable=lambda value: bool(value) and "❌" not in value and "失败" not in value,
+        )
+        try:
+            return future.result(timeout=budget)
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            return f"统一市场数据工具执行失败：行情取数超过 {budget:g} 秒，请稍后重试。"
+        except Exception as exc:
+            return f"统一市场数据工具执行失败：{exc}"

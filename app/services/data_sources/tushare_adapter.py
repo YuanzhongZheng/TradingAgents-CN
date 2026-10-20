@@ -155,9 +155,11 @@ class TushareAdapter(DataSourceAdapter):
             else:
                 fields = "open,high,low,close,vol,amount,trade_date"
 
+            from core.market_runtime.transport import BudgetTushareApi
             bar_kwargs = {
                 "ts_code": ts_code,
-                "api": prov.api,
+                "api": BudgetTushareApi(prov.api),
+                "retry_count": 1,
                 "freq": freq,
                 "adj": adj_arg,
                 "fields": fields,

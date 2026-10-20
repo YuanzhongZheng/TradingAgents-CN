@@ -246,6 +246,9 @@ class SystemConfigMixin:
             if saved_config:
                 print(f"✅ 配置保存成功，验证LLM配置数量: {len(saved_config.get('llm_configs', []))}")
 
+                from app.core.unified_config import UnifiedConfigManager
+                UnifiedConfigManager.invalidate_data_source_cache()
+
                 # 暂时跳过统一配置同步，避免冲突
                 # unified_config.sync_to_legacy_format(config)
 

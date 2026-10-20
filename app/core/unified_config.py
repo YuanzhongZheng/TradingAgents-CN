@@ -69,7 +69,14 @@ class UnifiedConfigManager:
     # 类级别数据源配置缓存（所有实例共享，避免重复查询 MongoDB）
     _ds_config_cache: Optional[List] = None
     _ds_config_cache_time: float = 0.0
+    _ds_config_revision: int = 0
     _DS_CONFIG_CACHE_TTL: float = 300.0  # 5 分钟 TTL
+
+    @classmethod
+    def invalidate_data_source_cache(cls):
+        cls._ds_config_cache = None
+        cls._ds_config_cache_time = 0.0
+        cls._ds_config_revision += 1
 
     def __init__(self):
         self.paths = ConfigPaths()

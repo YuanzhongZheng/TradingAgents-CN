@@ -136,6 +136,17 @@ class MarketAnalystV2(AnalystAgent):
     output_field = "market_report"
 
     def execute(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        from core.market_runtime.context import analysis_snapshot
+        from core.tools.context import set_current_analysis_data_source, reset_current_analysis_data_source
+        _, analysis_date = self._extract_common_params(state)
+        token = set_current_analysis_data_source(state.get("_analysis_data_source"))
+        try:
+            with analysis_snapshot(analysis_date):
+                return self._execute_with_snapshot(state)
+        finally:
+            reset_current_analysis_data_source(token)
+
+    def _execute_with_snapshot(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         覆盖执行逻辑以支持模板调试与提示词覆盖
         """

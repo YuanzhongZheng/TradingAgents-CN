@@ -116,6 +116,9 @@ def test_bars_outside_requested_range_are_dropped_and_next_source_is_used() -> N
             self.name = name
             self.rows = rows
 
+        def is_available(self):
+            return True
+
         def get_kline(self, code, period="day", limit=120, adj=None, start_date=None, end_date=None):
             calls.append({
                 "name": self.name,
@@ -143,7 +146,8 @@ def test_bars_outside_requested_range_are_dropped_and_next_source_is_used() -> N
         "volume": 1,
         "amount": 1,
     }])
-    manager.get_available_adapters = lambda: [future, january]
+    manager.adapters = [future, january]
+    manager._configured_enabled_map = {}
     manager._write_historical_bars = lambda *args, **kwargs: None
 
     frame, source = manager.read_historical_bars(
@@ -168,6 +172,9 @@ def test_empty_requested_range_returns_no_rows_instead_of_latest_bars() -> None:
     class Adapter:
         name = "tushare"
 
+        def is_available(self):
+            return True
+
         def get_kline(self, code, period="day", limit=120, adj=None, start_date=None, end_date=None):
             return [{
                 "time": "2026-10-16",
@@ -179,7 +186,8 @@ def test_empty_requested_range_returns_no_rows_instead_of_latest_bars() -> None:
                 "amount": 1,
             }]
 
-    manager.get_available_adapters = lambda: [Adapter()]
+    manager.adapters = [Adapter()]
+    manager._configured_enabled_map = {}
 
     def remember_write(*args, **kwargs):
         manager.written = True

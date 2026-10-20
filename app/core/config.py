@@ -325,6 +325,9 @@ class Settings(BaseSettings):
     # 默认60天：可覆盖MA60等所有常用技术指标（MA5/10/20/60, MACD, RSI, BOLL）
     MARKET_ANALYST_LOOKBACK_DAYS: int = Field(default=60, ge=5, le=365, description="市场分析回溯天数（用于技术分析）")
 
+    MARKET_STRUCTURE_TIMEOUT_SECONDS: float = Field(default=20, ge=0.1, le=300, description="结构分析及统一行情工具的总等待秒数")
+    MARKET_PROVIDER_TIMEOUT_SECONDS: float = Field(default=8, ge=0.1, le=120, description="行情 HTTP 单次连接/读取超时秒数")
+
     # ==================== BaoStock统一数据同步配置 ====================
 
     # BaoStock统一数据同步总开关
