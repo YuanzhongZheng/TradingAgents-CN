@@ -1,7 +1,7 @@
 """缠论笔与三笔重叠区间的规则化计算。
 
-这里只做到笔级别：包含处理、分型、笔、三笔重叠近似区间，以及以区间为背景的
-进入段和离开段力度比较。没有线段划分和级别联立，结果只能作为候选。
+包含处理、分型、笔、特征序列线段，以及笔/线段分别构成的重叠区间。
+保留笔级别的动能观察；线段确认不等于跨周期级别联立或背驰确认。
 """
 
 from __future__ import annotations
@@ -16,10 +16,11 @@ from .structure_bars import (
     macd_hist,
     same_color_macd_area,
 )
+from .chanlun_segments import chanlun_segments
 
 Stroke = Tuple[str, int, StructureBar]
 
-CHANLUN_LIMITATION = "只有笔和三笔重叠近似，没有线段、级别联立，背驰只到候选"
+CHANLUN_LIMITATION = "线段按特征序列确认，起点受样本边界影响；三线段重叠未递归为走势类型，未做跨周期级别联立，背驰只到候选"
 
 
 def merge_chanlun_bars(bars: Sequence[StructureBar]) -> List[StructureBar]:
@@ -111,9 +112,11 @@ def chanlun_bi(fractals: Sequence[Stroke]) -> List[Stroke]:
 def _stroke_segments(strokes: Sequence[Stroke]) -> List[Tuple[float, float]]:
     segments = []
     for index in range(len(strokes) - 1):
-        start = strokes[index][2]
-        end = strokes[index + 1][2]
-        segments.append((min(start.low, end.low), max(start.high, end.high)))
+        start_kind, _, start = strokes[index]
+        end_kind, _, end = strokes[index + 1]
+        start_price = start.high if start_kind == "top" else start.low
+        end_price = end.high if end_kind == "top" else end.low
+        segments.append((min(start_price, end_price), max(start_price, end_price)))
     return segments
 
 
@@ -332,6 +335,23 @@ def analyze_chanlun_bars(bars: Sequence[StructureBar]) -> Dict[str, object]:
     merged = merge_chanlun_bars(bars)
     fractals = chanlun_fractals(merged)
     strokes = chanlun_bi(fractals)
+    segmentation = chanlun_segments(strokes)
+    segment_endpoints = []
+    for segment in segmentation["segments"]:
+        # A fractal needs its right-hand bar. Do not report the extreme's date
+        # as the time at which its supporting stroke became observable.
+        confirmation = strokes[segment["confirmed_stroke"]][1]
+        raw_index = merged[min(confirmation + 1, len(merged) - 1)].end_index
+        segment["confirmed_at"] = bars[raw_index].time
+        segment["confirmed_bar_index"] = raw_index
+        if not segment_endpoints:
+            segment_endpoints.append(strokes[segment["start_stroke"]])
+        segment_endpoints.append(strokes[segment["end_stroke"]])
+    segment_centers = chanlun_zhongshu(segment_endpoints)
+    for center in segment_centers:
+        center["kind"] = "三线段重叠"
+        center["start_segment"] = center.pop("start_stroke")
+        center["end_segment"] = center.pop("end_stroke")
     centers = chanlun_zhongshu(strokes)
     hist = macd_hist([bar.close for bar in bars])
     moves = _stroke_moves(strokes, hist)
@@ -346,6 +366,10 @@ def analyze_chanlun_bars(bars: Sequence[StructureBar]) -> Dict[str, object]:
         "bar_count": len(bars),
         "merged_count": len(merged),
         "strokes": strokes,
+        "segments": segmentation["segments"],
+        "segment_candidate": segmentation["candidate"],
+        "segment_centers": segment_centers,
+        "segment_skipped_strokes": segmentation["skipped_strokes"],
         "moves": moves[-6:],
         "centers": centers[-2:],
         "background": background,
@@ -386,6 +410,30 @@ def render_chanlun(label: str, result: Dict[str, object], source: str = "") -> s
             )
     else:
         lines.append("- 最近的笔: 未形成有效笔")
+    segments = result.get("segments") or []
+    lines.append("- 特征序列线段（端点时间与确认时间分列）:")
+    for segment in segments[-6:]:
+        lines.append(
+            f"  - {direction_label(segment['direction'])} {segment['start']} {fmt_price(segment['start_price'])} → "
+            f"{segment['end']} {fmt_price(segment['end_price'])}，{segment['stroke_count']}笔；"
+            f"{segment['rule']}，确认于 {segment['confirmed_at']}"
+        )
+    if not segments:
+        lines.append("  - 尚无线段满足确认条件")
+    candidate_segment = result.get("segment_candidate")
+    if candidate_segment:
+        lines.append(
+            f"- 未确认线段: {direction_label(candidate_segment['direction'])} "
+            f"{candidate_segment['start']} → {candidate_segment['end']}；{candidate_segment['rule']}，"
+            "不参与三线段重叠计算"
+        )
+    segment_centers = result.get("segment_centers") or []
+    if segment_centers:
+        center = segment_centers[-1]
+        lines.append(f"- 三线段重叠区间: {fmt_price(center['lower'])} - {fmt_price(center['upper'])}"
+                     f"（{center['state']}；仅使用已确认线段，未递归为高级别走势中枢）")
+    else:
+        lines.append("- 三线段重叠区间: 尚未形成")
     pending = result.get("pending")
     if pending:
         if pending.get("extending"):

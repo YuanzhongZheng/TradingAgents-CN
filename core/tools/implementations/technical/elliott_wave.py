@@ -1,7 +1,7 @@
 """波浪理论的规则化候选计数。
 
 只在已确认的摆动拐点上检查推动浪的三条铁律和 ABC 的常见比例。
-末端未确认的拐点单独给出暂定计数，不混进已确认结果。内部子浪没有检验。
+末端未确认的拐点单独给出暂定计数，不混进已确认结果。对已确认父端点检验一层内部子浪。
 """
 
 from __future__ import annotations
@@ -191,6 +191,7 @@ def _label_elliott(pivots: Sequence[Pivot]) -> Dict[str, object]:
             continue
         rising = checks["bullish"]
         pattern = "上升推动五浪候选" if rising else "下降推动五浪候选"
+        following = None
         if not checks["fifth_extended"]:
             pattern += "，第5浪未创新高" if rising else "，第5浪未创新低"
         if offset:
@@ -199,8 +200,12 @@ def _label_elliott(pivots: Sequence[Pivot]) -> Dict[str, object]:
                 follow = abc_checks(pivots[end - 1:])
                 if follow["valid"]:
                     pattern += f"，这三段可看作ABC调整候选（{follow['shape']}）"
+                    following = {"points": list(pivots[end - 1:]), "shape": follow["shape"]}
         return {
             "pattern": pattern,
+            "structure_kind": "impulse",
+            "structure_points": list(points),
+            "following_structure": following,
             "waves": _build_waves(points, ["1", "2", "3", "4", "5"]),
             "rules": checks["rules"],
             "guidelines": checks["guidelines"],
@@ -216,6 +221,8 @@ def _label_elliott(pivots: Sequence[Pivot]) -> Dict[str, object]:
         shape = ""
     return {
         "pattern": pattern,
+        "structure_kind": "abc" if checks["valid"] else "unclassified",
+        "structure_points": list(points),
         "shape": shape,
         "waves": _build_waves(points, ["A", "B", "C"]),
         "rules": [],
@@ -229,6 +236,20 @@ def analyze_elliott_bars(bars: Sequence[StructureBar], threshold: float) -> Dict
         return {"status": "insufficient", "bar_count": len(bars)}
     pivots, candidate = zigzag_pivots(bars, threshold)
     labeled = _label_elliott(pivots)
+    base_pattern = str(labeled["pattern"])
+    from .elliott_subwaves import validate_subwaves, STATUS_LABELS
+
+    validation = validate_subwaves(bars, labeled.get("structure_points", []),
+                                   labeled.get("structure_kind", "unclassified"), threshold,
+                                   labeled.get("shape", ""))
+    if labeled.get("structure_kind") in ("impulse", "abc"):
+        labeled["pattern"] += f"（一层子浪检验：{STATUS_LABELS[validation['status']]}）"
+    labeled["unverified"] = list(validation["limitations"]) + ["不是已确认的波浪计数"]
+    following = labeled.get("following_structure")
+    following_validation = None
+    if following:
+        following_validation = validate_subwaves(bars, following["points"], "abc", threshold, following["shape"])
+        labeled["pattern"] += f"（后续ABC子浪检验：{STATUS_LABELS[following_validation['status']]}）"
     core_pattern = str(labeled["pattern"])
     pattern = core_pattern
     terminal_status = "confirmed"
@@ -239,7 +260,7 @@ def analyze_elliott_bars(bars: Sequence[StructureBar], threshold: float) -> Dict
         kind = "高点" if candidate[0] == "high" else "低点"
         provisional_label = _label_elliott(list(pivots) + [candidate])
         provisional_pattern = str(provisional_label["pattern"])
-        if provisional_pattern != core_pattern:
+        if provisional_pattern != base_pattern:
             provisional = provisional_pattern
         if pivots:
             start_price = _price_of(pivots[-1])
@@ -278,6 +299,8 @@ def analyze_elliott_bars(bars: Sequence[StructureBar], threshold: float) -> Dict
         "rules": labeled["rules"],
         "guidelines": labeled["guidelines"],
         "unverified": labeled["unverified"],
+        "subwave_validation": validation,
+        "following_subwave_validation": following_validation,
         "latest_time": bars[-1].time,
         "latest_close": bars[-1].close,
     }
@@ -297,6 +320,21 @@ def render_elliott(label: str, result: Dict[str, object], source: str = "") -> s
     ]
     if source:
         lines.append(f"- 数据源: {source}")
+    for title, validation in (("内部子浪检验", result.get("subwave_validation")),
+                              ("后续ABC子浪检验", result.get("following_subwave_validation"))):
+        if not validation:
+            continue
+        from .elliott_subwaves import STATUS_LABELS
+
+        lines.append(f"- {title}: {STATUS_LABELS[validation['status']]}；{validation['method']}")
+        for leg in validation["legs"]:
+            lines.append(
+                f"  - 父浪{leg['label']} {leg['start']} → {leg['end']}：需要{leg['expected']}段，"
+                f"分辨出{leg['observed']}段，{STATUS_LABELS[leg['status']]}；{leg['reason']}"
+            )
+            failed = [name for name, ok in leg["checks"] if not ok]
+            if failed:
+                lines.append("    - 未通过规则: " + "；".join(failed))
     if result.get("shape"):
         lines.append(f"- ABC形状: {result['shape']}候选")
     rules = result.get("rules") or []
